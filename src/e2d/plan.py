@@ -104,14 +104,15 @@ def build_plan(summary) -> dict:
          by_cat.get("shipper", []))
     step("Import dashboards",
          "Safe once their fields are flowing.",
-         "Upload each dashboards/*.json in the Dynatrace Dashboards app, or "
-         "push via the deploy panel / e2d push.",
+         "Apply the terraform/ module (dynatrace_document resources), or upload "
+         "each dashboards/*.json in the Dynatrace Dashboards app, or push via "
+         "the deploy panel / e2d push.",
          by_cat.get("dashboard", []))
     step("Create SLOs",
          "SLOs read live data; create them after dashboards confirm the data "
          "looks right.",
-         "Follow each slos/<name>.slo.md: paste the DQL SLI into the SLO app "
-         "or POST it via the SLO API.",
+         "Apply the terraform/ module (dynatrace_platform_slo), or follow each "
+         "slos/<name>.slo.md to paste the DQL SLI into the SLO app.",
          by_cat.get("slo", []))
     step("Recreate synthetic monitors",
          "Independent of log data; needs only the target endpoints reachable "
@@ -133,6 +134,12 @@ def build_plan(summary) -> dict:
                 "detectors_enabled = true), or POST the .detectors.json settings "
                 "body, or push from the deploy panel.",
     }[emit]
+    step("Schedule maintenance windows",
+         "AppD schedules become Dynatrace maintenance windows so detectors stay quiet "
+         "during the original suppression windows.",
+         "Apply the terraform/ module (dynatrace_maintenance), or POST each "
+         "maintenance/*.windows.json to the Settings API.",
+         by_cat.get("maintenance", []))
     step("Enable alerting last",
          "Detectors evaluate live data; enabling them before data flows just "
          "fires false alarms. Review each threshold and window first.",

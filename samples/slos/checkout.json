@@ -1,0 +1,15 @@
+{
+  "name": "Checkout availability",
+  "indicator": {
+    "type": "sli.kql.custom",
+    "params": {
+      "index": "logs-checkout-*",
+      "filter": "service.name: \"checkout\"",
+      "good": "status < 500",
+      "total": "status >= 100"
+    }
+  },
+  "objective": { "target": 0.995 },
+  "timeWindow": { "duration": "30d", "type": "rolling" },
+  "budgetingMethod": "occurrences"
+}

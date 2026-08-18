@@ -24,6 +24,8 @@ e2d dashboard samples/dashboards/complex_dashboard.ndjson -o out/
 | `queries/top_errors.esql` | ES\|QL → DQL |
 | `queries/kql_lucene_samples.txt` | KQL/Lucene one-liners (incl. quoted field names) |
 | `transforms/service_slo_transform.json` | continuous transform → rollup DQL + SLO note |
+| `slos/checkout.json` | Kibana custom-KQL SLO → `makeTimeseries` SLI + Terraform |
+| `appd/schedules.json` | AppD schedules → maintenance windows + Terraform |
 | `config/ilm_policy.json` | ILM → Grail bucket-retention guide |
 | `config/index_template.json` | index template → OpenPipeline routing guide |
 | `config/enrich_policy.json` | enrich policy → Grail lookup guide |

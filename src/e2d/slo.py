@@ -94,7 +94,9 @@ def translate_slo(text: str, config: Optional[MappingConfig] = None,
     if pre != "true":
         lines.append(f"| filter {pre}")
     total_expr = "count()" if total == "true" else f"countIf({total})"
-    lines.append(f"| summarize sli = countIf({good}) * 100.0 / {total_expr}")
+    # Platform SLOs require `sli` as a timeseries (array of doubles), not a scalar.
+    lines.append(
+        f"| makeTimeseries sli = (countIf({good}) * 100.0 / {total_expr}), interval:1h")
     res.dql = "\n".join(lines)
 
     from e2d.dql.validate import lint_into_report
@@ -128,8 +130,8 @@ def render_slo(res: SloResult) -> str:
                      f"evaluation window to **{res.window or 'the original window'}**.")
         else:
             L.append("2. Set the target and window to match the original objective.")
-        L.append("3. Or automate it: the SLO API accepts the same definition; "
-                 "see Dynatrace docs on creating SLOs with a custom DQL SLI.")
+        L.append("3. Or apply the `dynatrace_platform_slo` resource in `terraform/` "
+                 "(the migration writes one when the SLI converted).")
         L.append("")
         L.append("Definition sketch for the API:")
         L.append("")
@@ -147,3 +149,13 @@ def render_slo(res: SloResult) -> str:
 
 def _win(window: str) -> str:
     return (window.split() or ["30d"])[0]
+
+
+def slo_timeframe(window: str) -> str:
+    """Kibana `30d rolling` → Dynatrace `now-30d`."""
+    token = _win(window)
+    if not token or token == "?":
+        return "now-30d"
+    if token.startswith("now-"):
+        return token
+    return f"now-{token}"

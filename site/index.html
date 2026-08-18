@@ -298,9 +298,9 @@
 <main class="wrap" id="app" data-plat="home">
   <div class="hero v v-home">
     <h1>Elastic &amp; AppDynamics &#8594; Dynatrace</h1>
-    <p class="tagline">A drag-and-drop converter: your source platform's dashboards, alerts,
-       queries and configuration become their Dynatrace equivalents &mdash;
-       <strong>entirely in this browser tab</strong>. Nothing is uploaded.
+    <p class="tagline">A drag-and-drop converter: Elastic and AppDynamics configuration
+       becomes a <strong>Dynatrace Terraform module</strong> you can copy into a repo
+       and apply &mdash; <strong>entirely in this browser tab</strong>. Nothing is uploaded.
        To pull from a source platform and push to Dynatrace automatically, run it locally on
        your machine from
        <a href="https://github.com/JD-DT94/migration-assistant">the GitHub repo</a>.</p>
@@ -332,7 +332,7 @@
     <div class="hero platintro">
       <h1>Elastic &#8594; Dynatrace</h1>
       <p class="tagline">Kibana dashboards, queries, ingest pipelines, watchers, transforms,
-         SLOs and Beats configs.</p>
+         SLOs and Beats configs &mdash; exported as a Terraform child module.</p>
     </div>
     <div class="egrow note">Try an example:
       <button class="egchip" data-eg="dashboard">dashboard</button>
@@ -351,7 +351,7 @@
     <div class="hero platintro">
       <h1>AppDynamics &#8594; Dynatrace</h1>
       <p class="tagline">Health rules, custom dashboards, policies and actions &mdash; and an
-         onboarding plan that sizes the OneAgent rollout by host.</p>
+         onboarding plan that sizes the OneAgent rollout by host. The export is Terraform.</p>
     </div>
     <div class="egrow note">Try an example:
       <button class="egchip" data-eg="appdrule">health rules</button>
@@ -435,8 +435,10 @@
         percentiles missing a rollup. Findings land in the report next to the artifact.</li>
       <li><b>Report.</b> A scorecard, a deployment order, and per-artifact notes saying
         exactly what a human still has to decide.</li>
-      <li><b>Deploy.</b> Upload-ready JSON, an importable Terraform module, or a direct
-        push &mdash; your choice, per run.</li>
+      <li><b>Deploy.</b> The run writes one importable Terraform child module
+        under <code>terraform/</code> &mdash; copy it into a repo or apply via
+        <code>example-root/</code>. Upload-ready JSON and a direct push stay available
+        as supporting paths.</li>
     </ol>
 
     <h3 class="map-h">Four honest categories</h3>
@@ -474,42 +476,15 @@
 
   <details class="panel v v-conv" id="howto-card" style="margin-top:16px">
     <summary class="h">How to deploy what you downloaded</summary>
-    <p class="note">The converted files fall into three groups, each with its own route into
-       Dynatrace. Everything below is a one-time setup per environment.</p>
+    <p class="note">The primary export is the Terraform child module in
+       <code>terraform/</code>. JSON is a supporting route for the same objects.
+       Everything below is a one-time setup per environment.</p>
 
-    <h3 class="map-h">1. Dashboards &mdash; <code>dashboards/*.json</code></h3>
-    <p class="note">Each file is a bare dashboard document, so the Dashboards app imports it
-       directly and names it after the file.</p>
-    <ul class="howto">
-      <li><b>In the UI:</b> Dashboards app &rarr; <b>Upload</b> &rarr; pick the
-        <code>.json</code>. Nothing else to configure.</li>
-      <li><b>Via API:</b> <code>POST {env}/platform/document/v1/documents</code> as
-        <code>multipart/form-data</code> with <code>name</code>, <code>type=dashboard</code>
-        and the file as <code>content</code>. Token scope:
-        <code>document:documents:write</code>.</li>
-    </ul>
-
-    <h3 class="map-h">2. Settings objects &mdash; <code>*.detectors.json</code>,
-        <code>*.pipeline.json</code>, <code>*.windows.json</code></h3>
-    <p class="note">These files <em>are</em> the request body &mdash; a JSON array of
-       <code>{schemaId, scope, value}</code> objects. Post one file, get one or more
-       configuration objects.</p>
-    <ul class="howto">
-      <li><code>POST {env}/api/v2/settings/objects</code> with
-        <code>Content-Type: application/json</code> and the file as the body.
-        Token scope: <code>settings:objects:write</code>.</li>
-      <li>Covers Davis anomaly detectors (from alerts and health rules), OpenPipeline
-        pipelines, and maintenance windows (from AppD schedules).</li>
-      <li>A <code>207</code> response is normal for a multi-object body &mdash; check each
-        entry's <code>code</code>, because one object can fail while the rest succeed.</li>
-      <li>Detectors converted from a dynamic threshold ship <b>disabled</b> on purpose, with
-        a <code>0</code> placeholder. Set a real threshold before enabling.</li>
-    </ul>
-
-    <h3 class="map-h">3. Terraform &mdash; <code>terraform/</code></h3>
-    <p class="note">One <b>child module</b> for the whole run, not a folder per artifact.
-       It declares which provider it needs but configures none, so it drops into an
-       existing repository and inherits your provider setup &mdash; no duplicate
+    <h3 class="map-h">1. Terraform &mdash; <code>terraform/</code> (the export)</h3>
+    <p class="note">One <b>child module</b> for the whole run: dashboards, detectors,
+       pipelines, workflows, request attributes, SLOs and maintenance windows. It declares
+       which provider it needs but configures none, so it drops into an existing repository
+       and inherits your provider setup &mdash; no duplicate
        <code>terraform&nbsp;{}</code> block to collide with yours.</p>
     <pre class="cmdblock">module "migrated" {
   source = "./modules/migrated"
@@ -527,15 +502,44 @@
       <li><b>Detectors are created disabled</b> by default. Enabling hundreds at once pages
         people about a system nobody has validated, and Davis needs 7&ndash;14 days before
         its baselines are trustworthy. Set <code>detectors_enabled = true</code> per wave.</li>
-      <li><b>Anomaly detectors and request attributes</b> use an API token:
+      <li><b>Anomaly detectors, documents and request attributes</b> use an API token:
         <code>DYNATRACE_ENV_URL</code> and <code>DYNATRACE_API_TOKEN</code>.</li>
-      <li><b>OpenPipeline</b> needs an OAuth client instead, not a token:
-        <code>DT_CLIENT_ID</code>, <code>DT_CLIENT_SECRET</code>,
+      <li><b>OpenPipeline, Workflows and platform SLOs</b> need an OAuth client or platform
+        token: <code>DT_CLIENT_ID</code>, <code>DT_CLIENT_SECRET</code>,
         <code>DT_ACCOUNT_ID</code>, with scopes
         <code>openpipeline:configurations:read</code> and
         <code>&hellip;:write</code>.</li>
       <li>No Terraform state story yet? Choose <b>JSON only</b> in the export selector and
         skip this section entirely.</li>
+    </ul>
+
+    <h3 class="map-h">2. Dashboards as JSON &mdash; <code>dashboards/*.json</code></h3>
+    <p class="note">Optional if you apply the module. Each file is a bare dashboard document,
+       so the Dashboards app imports it directly and names it after the file.</p>
+    <ul class="howto">
+      <li><b>In the UI:</b> Dashboards app &rarr; <b>Upload</b> &rarr; pick the
+        <code>.json</code>. Nothing else to configure.</li>
+      <li><b>Via API:</b> <code>POST {env}/platform/document/v1/documents</code> as
+        <code>multipart/form-data</code> with <code>name</code>, <code>type=dashboard</code>
+        and the file as <code>content</code>. Token scope:
+        <code>document:documents:write</code>.</li>
+    </ul>
+
+    <h3 class="map-h">3. Settings objects &mdash; <code>*.detectors.json</code>,
+        <code>*.pipeline.json</code>, <code>*.windows.json</code></h3>
+    <p class="note">Optional if you apply the module. These files <em>are</em> the request
+       body &mdash; a JSON array of <code>{schemaId, scope, value}</code> objects. Post one
+       file, get one or more configuration objects.</p>
+    <ul class="howto">
+      <li><code>POST {env}/api/v2/settings/objects</code> with
+        <code>Content-Type: application/json</code> and the file as the body.
+        Token scope: <code>settings:objects:write</code>.</li>
+      <li>Covers Davis anomaly detectors (from alerts and health rules), OpenPipeline
+        pipelines, and maintenance windows (from AppD schedules).</li>
+      <li>A <code>207</code> response is normal for a multi-object body &mdash; check each
+        entry's <code>code</code>, because one object can fail while the rest succeed.</li>
+      <li>Detectors converted from a dynamic threshold ship <b>disabled</b> on purpose, with
+        a <code>0</code> placeholder. Set a real threshold before enabling.</li>
     </ul>
 
     <h3 class="map-h">Order matters</h3>

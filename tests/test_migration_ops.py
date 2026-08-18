@@ -111,6 +111,7 @@ def test_slo_kql_custom_becomes_sli_dql(tmp_path):
     res = translate_slo(json.dumps(SLO_DOC))
     assert res.target_pct == 99.5
     assert "countIf" in res.dql and "sli =" in res.dql
+    assert "makeTimeseries" in res.dql
     assert 'service.name == "checkout"' in res.dql
     p = tmp_path / "slo.json"
     p.write_text(json.dumps(SLO_DOC), encoding="utf-8")
@@ -133,6 +134,11 @@ def test_migrate_converts_slo_file(tmp_path):
     assert (tmp_path / "out" / "slos" / "checkout_slo.dql").exists()
     md = (tmp_path / "out" / "slos" / "checkout_slo.slo.md").read_text(encoding="utf-8")
     assert "99.5" in md and "sli" in md
+    assert (tmp_path / "out" / "terraform" / "slos.tf").exists()
+    hcl = (tmp_path / "out" / "terraform" / "slos.tf").read_text(encoding="utf-8")
+    assert "dynatrace_platform_slo" in hcl
+    assert "makeTimeseries" in hcl
+    assert "now-30d" in hcl
 
 
 # --------------------------------------------------------------------------- #

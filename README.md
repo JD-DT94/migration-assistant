@@ -1,8 +1,9 @@
 # migration assist (`e2d`)
 
 Convert **Elastic / Kibana** and **AppDynamics** artifacts into Dynatrace
-equivalents: dashboards, alerts, ingest pipelines, transforms, queries — and,
-for AppDynamics, a OneAgent onboarding plan sized by host.
+equivalents. **The primary export is a Terraform child module** (`terraform/`)
+you can drop into an existing repo or apply via `terraform/example-root/`.
+JSON, Markdown guides, and optional live push are supporting paths.
 
 ## Use it in the browser (nothing to install)
 
@@ -18,12 +19,12 @@ your files are never uploaded anywhere.
 
 | Input | Output |
 |-------|--------|
-| Kibana dashboard exports (`.ndjson`) — Lens (incl. formulas), TSVB, legacy visualizations, saved searches, controls, Vega with embedded ES queries | Dynatrace dashboard JSON (DQL tiles, variables, series colors) |
+| Kibana dashboard exports (`.ndjson`) — Lens (incl. formulas), TSVB, legacy visualizations, saved searches, controls, Vega with embedded ES queries | Dynatrace dashboard JSON **and** `dynatrace_document` Terraform |
 | Watchers and Kibana alerting rules | Davis anomaly detectors + Workflows (Terraform) |
-| Logstash `.conf` and Elasticsearch ingest pipelines | OpenPipeline DQL/DPL stages |
+| Logstash `.conf` and Elasticsearch ingest pipelines | OpenPipeline DQL/DPL stages + Terraform |
 | ES\|QL, Query DSL, KQL, Lucene | DQL |
 | Continuous transforms | Rollup DQL |
-| Kibana SLOs (custom-KQL indicators) | DQL SLI queries + objective guide |
+| Kibana SLOs (custom-KQL indicators) | Grail `makeTimeseries` SLI + `dynatrace_platform_slo` Terraform |
 | Filebeat configs (`filebeat.yml`) | OpenTelemetry Collector configs shipping to Dynatrace |
 | Heartbeat monitors (`heartbeat.yml`) | Dynatrace Synthetic HTTP monitor definitions |
 | ILM policies, index templates, enrich policies | Migration guides (bucket retention, routing, lookups) + `CUTOVER-PLAN.md` |
@@ -34,7 +35,7 @@ your files are never uploaded anywhere.
 |-------|--------|
 | Application / tier / node inventory (`/controller/rest/applications/{app}/nodes`) | `ONBOARDING-PLAN.md` — OneAgent rollout waves sized by **host**, host-group and tagging design, `waves.json` + `host_groups.json` |
 | Health rules (`/controller/alerting/rest/v1/.../health-rules`) | Davis anomaly detectors (Settings JSON or Terraform), with AppD units rescaled |
-| Custom dashboards (`CustomDashboardImportExportServlet`) | Dynatrace dashboard JSON with DQL tiles |
+| Custom dashboards (`CustomDashboardImportExportServlet`) | Dynatrace dashboard JSON **and** `dynatrace_document` Terraform |
 | Policies and actions (`/controller/policies`, `/controller/actions`) | Notification plan (problem notifications / Workflow tasks) |
 | Information points, data collectors, transaction detection rules | Inventory + guidance (business events, request attributes, custom services) |
 | *(always)* | `APPD-SEQUENCING.md` — ten-phase running order with per-wave exit criteria |
@@ -75,13 +76,38 @@ with log→metric extraction best practice, a `CUTOVER-PLAN.md` dual-ship
 schedule when ILM policies are present, and a suggested mapping config when
 index patterns need rules.
 
+## Terraform export
+
+`e2d migrate … -o out/` writes **one child module** at `out/terraform/`:
+
+```
+out/terraform/
+  versions.tf              # required_providers only — no provider block
+  variables.tf             # name_prefix, detectors_enabled=false
+  dashboards.tf            # dynatrace_document + documents/*.json
+  detectors.tf
+  pipelines.tf
+  workflows.tf
+  request_attributes.tf
+  slos.tf                  # dynatrace_platform_slo (custom DQL SLI)
+  maintenance.tf           # AppD schedules
+  outputs.tf
+  example-root/main.tf     # standalone apply entry
+  README.md
+```
+
+Copy `terraform/` into an existing repo and call `module "migrated" { source = "…" }`,
+or `cd terraform/example-root && terraform init && terraform plan`. Detectors stay
+disabled until you set `detectors_enabled = true` per wave.
+
 ## CLI
 
 ```bash
 pip install -e .            # Python >= 3.9, stdlib only
 e2d assess <export-dir>                     # scorecard only, converts nothing
                                             # exit 0 clean / 2 manual work / 1 errors
-e2d migrate <export-dir> -o out/            # convert everything, one report
+e2d migrate <export-dir> -o out/            # convert everything, one Terraform module
+ls out/terraform/                           # child module: copy or apply via example-root/
 e2d dashboard export.ndjson -o out/         # dashboards only
 e2d verify out/ --env-url https://<env>.apps.dynatrace.com          # DQL check
 e2d verify out/ --data ...                  # + flag tiles that return no data

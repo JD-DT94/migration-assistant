@@ -14,6 +14,7 @@ configures the wrong thing.
 import json
 import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -179,3 +180,40 @@ def test_terraform_init_and_validate_pass(built):
     validate = subprocess.run(["terraform", "validate", "-no-color"], cwd=str(root),
                               capture_output=True, text=True)
     assert validate.returncode == 0, validate.stdout or validate.stderr
+
+
+def test_dashboards_land_in_the_child_module(tmp_path):
+    src = Path(__file__).resolve().parents[1] / "samples" / "dashboards" / "simple_dashboard.ndjson"
+    indir = tmp_path / "in"
+    indir.mkdir()
+    (indir / "simple_dashboard.ndjson").write_bytes(src.read_bytes())
+    out = tmp_path / "out"
+    run_migration(str(indir), str(out))
+    tf = out / "terraform"
+    assert (tf / "dashboards.tf").exists()
+    hcl = (tf / "dashboards.tf").read_text(encoding="utf-8")
+    assert 'resource "dynatrace_document"' in hcl
+    assert 'type    = "dashboard"' in hcl
+    assert "file(\"${path.module}/documents/" in hcl
+    assert 'provider "dynatrace"' not in hcl
+    docs = list((tf / "documents").glob("*.json"))
+    assert docs, "dashboard sidecar JSON missing"
+    # the file() path uses the final resource identifier
+    assert any(p.stem in hcl for p in docs)
+
+
+def test_refresh_copies_healed_dashboard_json(tmp_path):
+    from e2d.terraform.resources import dashboard_resource
+    out = tmp_path / "out"
+    (out / "dashboards").mkdir(parents=True)
+    (out / "dashboards" / "shop.json").write_text(
+        json.dumps({"tiles": {"1": {"query": "fetch logs | filter healed == true"}}}) + "\n",
+        encoding="utf-8")
+    module = TerraformModule()
+    module.add(dashboard_resource(
+        "shop", {"tiles": {"1": {"query": "fetch logs | filter old == true"}}},
+        json_rel="dashboards/shop.json"))
+    module.refresh_from_healed(str(out))
+    payload = next(iter(module.resources[0].files.values()))
+    assert "healed == true" in payload
+    assert "old == true" not in payload

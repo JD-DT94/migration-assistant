@@ -13,6 +13,7 @@ venv/
 /dt_dashboards/
 /tf_out/
 *.local.json
+.e2d/
 
 # Terraform
 .terraform/

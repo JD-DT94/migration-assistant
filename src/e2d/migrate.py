@@ -335,6 +335,13 @@ def _do_kibana(text: str, src: str, out: Path, config: MappingConfig, summary: M
         (ddir / f"{base}.json").write_text(json.dumps(dashboard["content"], indent=2),
                                            encoding="utf-8")
         outs = [f"dashboards/{base}.json"]
+        if summary.tf_module is not None:
+            from e2d.terraform.resources import dashboard_resource
+            summary.tf_module.add(dashboard_resource(
+                dashboard.get("name") or d.title or base,
+                dashboard["content"],
+                json_rel=f"dashboards/{base}.json"))
+            outs.append("terraform/")
         audit = audit_dashboard_fields(dashboard)
         if audit["custom"]:
             merged = set(summary.dashboard_fields.get(src, [])) | set(audit["custom"])
@@ -417,7 +424,8 @@ def _do_pipeline(text: str, src: str, out: Path, kind: str, summary: MigrationSu
                          "see the .dpl file and remediation notes for what to add by hand.")
     if emit in ("tf", "both") and summary.tf_module is not None:
         from e2d.terraform.resources import pipeline_resource
-        summary.tf_module.add(pipeline_resource(Path(src).name, res))
+        json_rel = f"pipelines/{base}.pipeline.json" if emit in ("json", "both") else ""
+        summary.tf_module.add(pipeline_resource(Path(src).name, res, json_rel=json_rel))
         outs.append("terraform/")
     summary.items.append(Item("pipeline", src, _status(res.report), outs, notes))
 
@@ -456,8 +464,10 @@ def _do_alert(text: str, src: str, out: Path, config: MappingConfig, summary: Mi
                              "or re-run with the Terraform export for a deployable workflow.tf.")
     if has_terraform(res.spec) and emit in ("tf", "both") and summary.tf_module is not None:
         from e2d.terraform.resources import detector_resource, workflow_resource
+        json_rel = f"alerts/{base}.detectors.json"
         for i, det in enumerate(res.spec.detectors):
-            summary.tf_module.add(detector_resource(res.spec, det, i))
+            label = f"{json_rel}#detector:{i}" if emit in ("json", "both") else ""
+            summary.tf_module.add(detector_resource(res.spec, det, i, source_label=label))
         if needs_workflow(res.spec):
             summary.tf_module.add(workflow_resource(res.spec))
         outs.append("terraform/")
@@ -516,6 +526,7 @@ def _do_appd_health_rule(text: str, src: str, out: Path, config: MappingConfig,
 
         if not has_terraform(res.spec):
             continue
+        start_idx = len(settings_bodies)
         if emit in ("json", "both"):
             from e2d.sinks.dynatrace import detector_settings_value, ANOMALY_SCHEMA
             settings_bodies += [
@@ -524,8 +535,10 @@ def _do_appd_health_rule(text: str, src: str, out: Path, config: MappingConfig,
                 for det in res.spec.detectors]
         if emit in ("tf", "both") and summary.tf_module is not None:
             from e2d.terraform.resources import detector_resource
+            json_rel = f"alerts/{base}.detectors.json"
             for di, det in enumerate(res.spec.detectors):
-                summary.tf_module.add(detector_resource(res.spec, det, di))
+                label = f"{json_rel}#detector:{start_idx + di}" if emit in ("json", "both") else ""
+                summary.tf_module.add(detector_resource(res.spec, det, di, source_label=label))
             if "terraform/" not in outs:
                 outs.append("terraform/")
 
@@ -572,6 +585,11 @@ def _do_appd_dashboard(text: str, src: str, out: Path, config: MappingConfig,
     stem = _safe_filename(title)
     (ddir / f"{stem}.json").write_text(json.dumps(content, indent=2), encoding="utf-8")
     outs = [f"dashboards/{stem}.json"]
+    if summary.tf_module is not None:
+        from e2d.terraform.resources import dashboard_resource
+        summary.tf_module.add(dashboard_resource(title or stem, content,
+                                                 json_rel=f"dashboards/{stem}.json"))
+        outs.append("terraform/")
 
     try:
         fields = audit_dashboard_fields({"name": title, "content": content})
@@ -680,6 +698,11 @@ def _do_appd_schedules(text: str, src: str, out: Path, summary: MigrationSummary
         (mdir / f"{base}.windows.json").write_text(
             json.dumps(res.windows, indent=2) + "\n", encoding="utf-8")
         outs.append(f"maintenance/{base}.windows.json")
+        if emit in ("tf", "both") and summary.tf_module is not None:
+            from e2d.terraform.resources import maintenance_resource
+            for win in res.windows:
+                summary.tf_module.add(maintenance_resource(win["value"]))
+            outs.append("terraform/")
     summary.items.append(Item("maintenance", src, _status(res.report), outs,
                               res.report.format_deduped()))
 
@@ -757,6 +780,12 @@ def _do_slo(text: str, src: str, out: Path, config: MappingConfig, summary: Migr
     if res.dql:
         (sdir / f"{base}.dql").write_text(res.dql + "\n", encoding="utf-8")
         outs.insert(0, f"slos/{base}.dql")
+        if summary.tf_module is not None:
+            from e2d.terraform.resources import slo_resource
+            summary.tf_module.add(slo_resource(
+                res.name, res.dql, res.target_pct, res.window,
+                dql_rel=f"slos/{base}.dql"))
+            outs.append("terraform/")
     summary.items.append(Item("slo", src, _status(res.report), outs,
                               res.report.format_deduped()))
 
@@ -1074,10 +1103,14 @@ def run_migration(in_dir: str, out_dir: str, config: Optional[MappingConfig] = N
             render_cutover_plan(summary.ilm_policies, summary.template_patterns),
             encoding="utf-8")
 
-    # One Terraform child module for the whole run: a single directory that
-    # drops into an existing repository, rather than a root module per artifact
-    # (several of those merged into one config fail to init).
+    # Heal/verify first so Terraform is generated from the healed artifacts,
+    # then one child module for the whole run.
+    if verify or heal:
+        _run_heal_verify_loop(summary, out, env_url, token, verify, verify_data, heal,
+                              heal_rules=heal_rules, heal_dry_run=heal_dry_run)
+
     if summary.tf_module is not None and summary.tf_module.resources:
+        summary.tf_module.refresh_from_healed(str(out))
         summary.tf_module.write(str(out / "terraform"))
 
     # An AppD run always gets the phased plan and the full catalogue, not just
@@ -1094,10 +1127,6 @@ def run_migration(in_dir: str, out_dir: str, config: Optional[MappingConfig] = N
         (out / "APPD-CATALOGUE.md").write_text(
             render_coverage(summary.appd_kinds, converted=summary.appd_rule_classes),
             encoding="utf-8")
-
-    if verify or heal:
-        _run_heal_verify_loop(summary, out, env_url, token, verify, verify_data, heal,
-                              heal_rules=heal_rules, heal_dry_run=heal_dry_run)
 
     (out / "MIGRATION_REPORT.md").write_text(render_report(summary), encoding="utf-8")
     from e2d.score import report_payload

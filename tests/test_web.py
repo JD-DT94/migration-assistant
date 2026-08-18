@@ -42,6 +42,24 @@ def test_single_file_upload_and_migrate():
         s.close()
 
 
+def test_migrate_offers_a_terraform_module_zip():
+    s = Sessions()
+    try:
+        sid = s.new()
+        s.add_file(sid, "web.conf",
+                   b'input { beats { port => 5044 } }\n'
+                   b'filter { grok { match => { "message" => "%{IPORHOST:clientip}" } } }\n'
+                   b'output { elasticsearch { hosts => ["es:9200"] } }\n')
+        res = s.migrate(sid)
+        assert res["download_terraform"] == f"/download/{sid}/terraform"
+        with zipfile.ZipFile(io.BytesIO(s.download_terraform(sid))) as zf:
+            names = zf.namelist()
+        assert any(n.endswith("pipelines.tf") for n in names)
+        assert any(n.endswith("example-root/main.tf") for n in names)
+    finally:
+        s.close()
+
+
 def test_migrate_returns_inline_artifact_content():
     s = Sessions()
     try:

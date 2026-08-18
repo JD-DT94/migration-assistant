@@ -54,22 +54,24 @@ def test_schedule_detection_does_not_claim_other_appd_json():
 
 def test_weekly_schedule_becomes_a_weekly_window():
     res = translate_schedules(json.dumps([BUSINESS_HOURS]))
+    assert len(res.windows) == 5
     value = _window(res)
     assert res.windows[0]["schemaId"] == SCHEMA
     assert value["schedule"]["scheduleType"] == "WEEKLY"
     tw = _timewindow(value)
-    assert tw["startTime"] == "09:00"
-    assert tw["durationMinutes"] == 510          # 09:00 to 17:30
+    assert tw["startTime"] == "09:00:00"
+    assert tw["endTime"] == "17:30:00"
     assert tw["timeZone"] == "Europe/London"
-    assert value["schedule"]["weeklyRecurrence"]["days"] == [
-        "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY"]
+    days = [w["value"]["schedule"]["weeklyRecurrence"]["dayOfWeek"]
+            for w in res.windows]
+    assert days == ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY"]
 
 
 def test_window_crossing_midnight_gets_a_positive_duration():
     res = translate_schedules(json.dumps([NIGHTLY]))
     tw = _timewindow(_window(res))
-    assert tw["startTime"] == "23:00"
-    assert tw["durationMinutes"] == 180          # 23:00 -> 02:00, not negative
+    assert tw["startTime"] == "23:00:00"
+    assert tw["endTime"] == "02:00:00"
 
 
 def test_missing_timezone_defaults_to_utc_and_says_so():
@@ -109,8 +111,8 @@ def test_hour_and_minute_object_form_is_understood():
         {"name": "Obj", "timezone": "UTC", "scheduleType": "DAILY",
          "startTime": {"hour": 7, "minute": 5}, "durationInMinutes": 45}]))
     tw = _timewindow(_window(res))
-    assert tw["startTime"] == "07:05"
-    assert tw["durationMinutes"] == 45
+    assert tw["startTime"] == "07:05:00"
+    assert tw["endTime"] == "07:50:00"
 
 
 def test_render_lists_each_window():
@@ -118,6 +120,7 @@ def test_render_lists_each_window():
     md = render_schedules(res, "sched.json")
     assert "Business Hours" in md and "Nightly Batch" in md
     assert "settings/objects" in md
+    assert "terraform/" in md
 
 
 def test_empty_export_is_manual():
@@ -174,8 +177,12 @@ def test_schedules_reach_the_output_as_a_settings_body(tmp_path):
     assert any(it.category == "maintenance" for it in s.items)
     body = json.loads((out / "maintenance" / "schedules.windows.json")
                       .read_text(encoding="utf-8"))
-    assert len(body) == 2
+    assert len(body) == 6  # 5 weekdays + nightly
     assert all(o["schemaId"] == SCHEMA and o["scope"] == "environment" for o in body)
     # and the catalogue notices it
     covr = (out / "APPD-CATALOGUE.md").read_text(encoding="utf-8")
     assert "Schedules" in covr
+    hcl = (out / "terraform" / "maintenance.tf").read_text(encoding="utf-8")
+    assert 'resource "dynatrace_maintenance"' in hcl
+    assert "day_of_week" in hcl
+    assert 'provider "dynatrace"' not in hcl

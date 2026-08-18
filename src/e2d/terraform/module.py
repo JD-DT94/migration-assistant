@@ -33,7 +33,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 PROVIDER_SOURCE = "dynatrace-oss/dynatrace"
 PROVIDER_VERSION = ">= 1.70.0"
@@ -51,6 +51,27 @@ def hcl_str(value: str) -> str:
     return json.dumps(text).replace("${", "$${").replace("%{", "%%{")
 
 
+def _replace_hcl_dql(body: str, old: str, new: str) -> str:
+    """Swap one DQL string inside an already-rendered resource body."""
+    old_hcl, new_hcl = hcl_str(old), hcl_str(new)
+    if old_hcl in body:
+        return body.replace(old_hcl, new_hcl, 1)
+    return body
+
+
+_MODULE_GITIGNORE = """.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.lock.hcl
+terraform.tfvars
+"""
+
+_TFVARS_EXAMPLE = """# Copy to terraform.tfvars (gitignored) or pass -var on the CLI.
+# name_prefix       = "[migrated] "
+# detectors_enabled = false
+"""
+
+
 def ident(name: str, fallback: str = "resource") -> str:
     """A valid, readable Terraform identifier."""
     slug = re.sub(r"[^A-Za-z0-9]+", "_", str(name or "")).strip("_").lower()
@@ -62,6 +83,9 @@ def ident(name: str, fallback: str = "resource") -> str:
     return slug[:60]
 
 
+IDENT_TOKEN = "__IDENT__"
+
+
 @dataclass
 class Resource:
     """One Terraform resource, rendered by its owning converter."""
@@ -70,6 +94,15 @@ class Resource:
     body: str                    # the block body, already indented two spaces
     group: str = "main"          # which .tf file it lands in
     comment: str = ""
+    # Extra files written next to the .tf (e.g. dashboard JSON). Keys may use
+    # IDENT_TOKEN; add() rewrites them to the final resource name.
+    files: Dict[str, str] = field(default_factory=dict)
+    # Path relative to the migration output dir; after heal, copy that file
+    # into every sidecar listed in ``files``.
+    refresh_from: str = ""
+    # (original_dql, artifact_label) so HCL can be patched from healed files.
+    # Labels match ``_iter_dql_artifacts`` (e.g. alerts/x.detectors.json#detector:0).
+    dql_slots: List[Tuple[str, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -95,8 +128,49 @@ class TerraformModule:
         else:
             self._used[key] = 1
         resource.name = base
+        if IDENT_TOKEN in resource.body:
+            resource.body = resource.body.replace(IDENT_TOKEN, base)
+        resource.files = {k.replace(IDENT_TOKEN, base): v for k, v in resource.files.items()}
         self.resources.append(resource)
         return base
+
+    def refresh_from_healed(self, out_dir: str) -> None:
+        """Copy healed sidecar JSON and patched DQL into resource bodies/files.
+
+        Heal mutates ``dashboards/*.json``, ``*.detectors.json`` and
+        ``*.pipeline.json`` on disk. Terraform is generated from in-memory
+        bodies, so without this step ``terraform apply`` would ship pre-heal
+        queries.
+        """
+        root = Path(out_dir)
+        for r in self.resources:
+            if r.refresh_from:
+                src = root / r.refresh_from
+                if src.is_file():
+                    text = src.read_text(encoding="utf-8")
+                    if not text.endswith("\n"):
+                        text += "\n"
+                    r.files = {k: text for k in r.files} if r.files else r.files
+        labels = {label for r in self.resources for _, label in r.dql_slots if label}
+        if not labels:
+            return
+        try:
+            from e2d.api.client import _iter_dql_artifacts
+        except Exception:
+            return
+        healed = {lab: dql for lab, dql in _iter_dql_artifacts(str(root)) if lab in labels}
+        if not healed:
+            return
+        for r in self.resources:
+            if not r.dql_slots:
+                continue
+            new_slots: List[Tuple[str, str]] = []
+            for old, label in r.dql_slots:
+                new = healed.get(label, old)
+                if new != old:
+                    r.body = _replace_hcl_dql(r.body, old, new)
+                new_slots.append((new, label))
+            r.dql_slots = new_slots
 
     @property
     def groups(self) -> Dict[str, List[Resource]]:
@@ -176,8 +250,10 @@ variable "detectors_enabled" {
 # Copy this next to the module (or point `source` at wherever you put it) and
 # run terraform from HERE, not from inside the module directory.
 #
-#   export DYNATRACE_ENV_URL="https://<env-id>.live.dynatrace.com"
-#   export DYNATRACE_API_TOKEN="dt0c01.XXXX"
+#   export DYNATRACE_ENV_URL="https://<env-id>.apps.dynatrace.com"
+#   export DYNATRACE_API_TOKEN="dt0c01.XXXX"   # settings, documents, detectors
+#   # OpenPipeline, Workflows and platform SLOs also need OAuth or a platform token:
+#   #   DT_CLIENT_ID / DT_CLIENT_SECRET / DT_ACCOUNT_ID
 #   terraform init && terraform plan
 
 terraform {
@@ -208,11 +284,12 @@ output "migrated" {
 
     def readme(self) -> str:
         groups = ", ".join(f"`{g}.tf`" for g in sorted(self.groups)) or "none"
+        n = len(self.resources)
         return f'''# Migrated Dynatrace configuration
 
-A Terraform **child module**. It declares which provider it needs but does not
-configure one, so it drops into an existing repository and inherits your
-provider setup.
+This directory **is** the export: a Terraform **child module** with {n} resource(s).
+It declares which provider it needs but does not configure one, so it drops into
+an existing repository and inherits your provider setup.
 
 ## Using it from an existing repository
 
@@ -247,9 +324,20 @@ If you have no Terraform repository yet, `example-root/` is a working root
 configuration. Run terraform from inside `example-root/`, not from here — a
 child module has no provider configuration and cannot be applied directly.
 
+```bash
+export DYNATRACE_ENV_URL="https://<env-id>.apps.dynatrace.com"
+export DYNATRACE_API_TOKEN="dt0c01.XXXX"
+cd example-root
+terraform init && terraform plan
+```
+
 ## What is in it
 
 Resources are grouped by kind: {groups}.
+
+Dashboard JSON lives in `documents/` and is referenced with `file()` so the
+HCL stays readable. After a re-run of the converter with `--heal`, regenerate
+this folder so queries stay in sync.
 
 ## Two variables worth knowing
 
@@ -284,5 +372,10 @@ needs a human decision, and the plan is the last place to catch them cheaply.
             put(f"{group}.tf", self.group_tf(group))
         put("outputs.tf", self.outputs_tf())
         put("README.md", self.readme())
+        put(".gitignore", _MODULE_GITIGNORE)
         put("example-root/main.tf", self.example_root_tf())
+        put("example-root/terraform.tfvars.example", _TFVARS_EXAMPLE)
+        for r in self.resources:
+            for rel, content in r.files.items():
+                put(rel, content)
         return {"dir": str(d), "files": written, "resources": len(self.resources)}

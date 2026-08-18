@@ -12,10 +12,11 @@ editing generated files.
 
 from __future__ import annotations
 
-from typing import List, Optional
+import json
+from typing import Any, Dict, List, Optional
 
 from e2d.alerts.model import AUTO_ADAPTIVE_ANALYZER, SEASONAL_ANALYZER, STATIC_ANALYZER
-from e2d.terraform.module import Resource, hcl_str
+from e2d.terraform.module import IDENT_TOKEN, Resource, hcl_str
 
 _ANALYZER = STATIC_ANALYZER  # backward-compatible alias
 
@@ -39,7 +40,7 @@ def _is_numeric(value) -> bool:
 # Davis anomaly detectors
 # --------------------------------------------------------------------------- #
 
-def detector_resource(spec, det, index: int) -> Resource:
+def detector_resource(spec, det, index: int, source_label: str = "") -> Resource:
     """One `dynatrace_davis_anomaly_detectors` body from a Detector."""
     title = f"{spec.name}: {det.title}"
     raw = str(det.threshold).strip().strip('"')
@@ -121,18 +122,21 @@ def detector_resource(spec, det, index: int) -> Resource:
                "baseline is trustworthy." if auto else "")
     return Resource(type="dynatrace_davis_anomaly_detectors",
                     name=f"{spec.name}_{index}" if index else spec.name,
-                    body=body, group="detectors", comment=comment)
+                    body=body, group="detectors", comment=comment,
+                    dql_slots=[(det.query, source_label)] if source_label and det.query else [])
 
 
 # --------------------------------------------------------------------------- #
 # OpenPipeline
 # --------------------------------------------------------------------------- #
 
-def pipeline_resource(name: str, res) -> Resource:
+def pipeline_resource(name: str, res, json_rel: str = "") -> Resource:
     """One `dynatrace_openpipeline_v2_logs_pipelines` body."""
     from pathlib import Path
+    from e2d.pipelines.tf import _ident
 
     stem = Path(name).stem
+    rn = _ident(stem, "logs")
     lines: List[str] = [
         f"  display_name = {_prefixed(stem[:100])}",
         f"  custom_id    = {hcl_str(('pipeline_' + stem)[:60])}",
@@ -141,6 +145,7 @@ def pipeline_resource(name: str, res) -> Resource:
         "    processors {",
     ]
     counter = 0
+    slots: List[tuple] = []
     for stage in res.stages:
         if stage.kind not in ("dql", "drop"):
             if stage.kind == "manual":
@@ -151,12 +156,13 @@ def pipeline_resource(name: str, res) -> Resource:
             continue
         counter += 1
         ptype = "drop" if stage.kind == "drop" else "dql"
+        pid = f"p{counter:03d}_{rn}"[:60]
         desc = stage.description or (stage.dql if stage.kind == "dql"
                                      else "drop matching records")
         lines += [
             "      processor {",
             f'        type        = {hcl_str(ptype)}',
-            f'        id          = {hcl_str(f"p{counter:03d}")}',
+            f'        id          = {hcl_str(pid)}',
             f"        description = {hcl_str(desc[:120])}",
             f"        enabled     = {'true' if stage.enabled else 'false'}",
             f"        matcher     = {hcl_str(stage.matcher)}",
@@ -165,10 +171,12 @@ def pipeline_resource(name: str, res) -> Resource:
             lines += ["        dql {",
                       f"          script = {hcl_str(stage.dql)}",
                       "        }"]
+            if json_rel and stage.dql:
+                slots.append((stage.dql, f"{json_rel}#proc:{pid}"))
         lines.append("      }")
     lines += ["    }", "  }"]
     return Resource(type="dynatrace_openpipeline_v2_logs_pipelines", name=stem,
-                    body="\n".join(lines), group="pipelines")
+                    body="\n".join(lines), group="pipelines", dql_slots=slots)
 
 
 # --------------------------------------------------------------------------- #
@@ -292,3 +300,132 @@ def workflow_resource(spec) -> Optional[Resource]:
     body = "\n".join(line for line in lines if line != "")
     return Resource(type="dynatrace_automation_workflow", name=spec.name,
                     body=body, group="workflows")
+
+
+# --------------------------------------------------------------------------- #
+# Dashboards (platform documents)
+# --------------------------------------------------------------------------- #
+
+def dashboard_resource(display_name: str, content: Dict[str, Any],
+                       json_rel: str = "") -> Resource:
+    """One `dynatrace_document` whose content is a sidecar JSON file.
+
+    ``IDENT_TOKEN`` is rewritten to the unique resource name in
+    ``TerraformModule.add``, so the ``file()`` path always matches the file we
+    write even when two dashboards slug to the same identifier.
+    """
+    payload = json.dumps(content, indent=2) + "\n"
+    body = f'''  type    = "dashboard"
+  name    = {_prefixed(display_name)}
+  content = file("${{path.module}}/documents/{IDENT_TOKEN}.json")'''
+    return Resource(type="dynatrace_document", name=display_name, body=body,
+                    group="dashboards",
+                    files={f"documents/{IDENT_TOKEN}.json": payload},
+                    refresh_from=json_rel)
+
+
+# --------------------------------------------------------------------------- #
+# Platform SLOs
+# --------------------------------------------------------------------------- #
+
+def slo_resource(name: str, dql: str, target_pct: Optional[float],
+                 window: str = "", dql_rel: str = "") -> Resource:
+    """One `dynatrace_platform_slo` with a custom DQL SLI."""
+    from e2d.slo import slo_timeframe
+
+    target = f"{float(target_pct):g}" if target_pct is not None else "99"
+    timeframe = slo_timeframe(window)
+    body = f'''  name        = {_prefixed(name)}
+  description = "Migrated from a Kibana SLO"
+
+  criteria {{
+    criteria_detail {{
+      target         = {target}
+      timeframe_from = {hcl_str(timeframe)}
+      timeframe_to   = "now"
+    }}
+  }}
+
+  custom_sli {{
+    indicator = {hcl_str(dql)}
+  }}'''
+    return Resource(type="dynatrace_platform_slo", name=name, body=body, group="slos",
+                    dql_slots=[(dql, dql_rel)] if dql_rel and dql else [])
+
+
+# --------------------------------------------------------------------------- #
+# Maintenance windows (AppD schedules)
+# --------------------------------------------------------------------------- #
+
+_RANGE_START = "2020-01-01"
+_RANGE_END = "2035-12-31"
+
+
+def maintenance_resource(value: Dict[str, Any]) -> Resource:
+    """One `dynatrace_maintenance` from a Settings `builtin:alerting.maintenance-window` value."""
+    gp = value.get("generalProperties") or {}
+    sched = value.get("schedule") or {}
+    name = gp.get("name") or "maintenance"
+    kind = (sched.get("scheduleType") or "DAILY").upper()
+    block = (sched.get("weeklyRecurrence") or sched.get("dailyRecurrence") or {})
+    tw = block.get("timeWindow") or {}
+    rng = block.get("recurrenceRange") or {}
+    start_date = rng.get("scheduleStartDate") or _RANGE_START
+    end_date = rng.get("scheduleEndDate") or _RANGE_END
+    start_time = _clock(tw.get("startTime") or "00:00")
+    end_time = _clock(tw.get("endTime") or "01:00")
+    zone = tw.get("timeZone") or "UTC"
+    time_window = (
+        "      time_window {\n"
+        f"        start_time = {hcl_str(start_time)}\n"
+        f"        end_time   = {hcl_str(end_time)}\n"
+        f"        time_zone  = {hcl_str(zone)}\n"
+        "      }"
+    )
+    recurrence_range = (
+        "      recurrence_range {\n"
+        f"        start_date = {hcl_str(start_date)}\n"
+        f"        end_date   = {hcl_str(end_date)}\n"
+        "      }"
+    )
+    if kind == "WEEKLY":
+        day = block.get("dayOfWeek") or (block.get("days") or ["MONDAY"])[0]
+        inner = (
+            "    weekly_recurrence {\n"
+            f"      day_of_week = {hcl_str(day)}\n"
+            f"{recurrence_range}\n"
+            f"{time_window}\n"
+            "    }"
+        )
+    else:
+        inner = (
+            "    daily_recurrence {\n"
+            f"{recurrence_range}\n"
+            f"{time_window}\n"
+            "    }"
+        )
+    body = f'''  enabled = true
+  general_properties {{
+    name              = {_prefixed(name)}
+    description       = {hcl_str(gp.get("description") or "Migrated from an AppDynamics schedule")}
+    type              = {hcl_str(gp.get("maintenanceType") or "PLANNED")}
+    disable_synthetic = {"true" if gp.get("disableSyntheticMonitorExecution") else "false"}
+    suppression       = {hcl_str(gp.get("suppression") or "DONT_DETECT_PROBLEMS")}
+  }}
+  schedule {{
+    type = {hcl_str(kind if kind in ("DAILY", "WEEKLY", "MONTHLY", "ONCE") else "DAILY")}
+{inner}
+  }}'''
+    return Resource(type="dynatrace_maintenance", name=name, body=body,
+                    group="maintenance")
+
+
+def _clock(value: str) -> str:
+    """HH:MM or HH:MM:SS → HH:MM:SS for the maintenance time_window schema."""
+    text = str(value or "00:00").strip()
+    parts = text.split(":")
+    if len(parts) >= 3:
+        return f"{int(parts[0]):02d}:{parts[1]}:{parts[2][:2]}"
+    if len(parts) == 2:
+        return f"{int(parts[0]):02d}:{parts[1]}:00"
+    return "00:00:00"

@@ -1,0 +1,17 @@
+[
+  {
+    "name": "Business Hours",
+    "timezone": "Europe/London",
+    "scheduleType": "WEEKLY",
+    "startTime": "09:00",
+    "endTime": "17:30",
+    "days": ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY"]
+  },
+  {
+    "name": "Nightly Batch",
+    "timeZone": "UTC",
+    "recurrenceType": "DAILY",
+    "startTime": "23:00",
+    "endTime": "02:00"
+  }
+]

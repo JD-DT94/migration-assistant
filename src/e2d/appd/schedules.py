@@ -22,6 +22,8 @@ from typing import Any, Dict, List, Optional
 from e2d.report import Report
 
 SCHEMA = "builtin:alerting.maintenance-window"
+RANGE_START = "2020-01-01"
+RANGE_END = "2035-12-31"
 
 _DAYS = {
     "MONDAY": "MONDAY", "TUESDAY": "TUESDAY", "WEDNESDAY": "WEDNESDAY",
@@ -122,6 +124,60 @@ def _days(rec: dict) -> List[str]:
     return out
 
 
+def _clock(hhmm: str) -> str:
+    """HH:MM → HH:MM:SS (Settings TimeWindow is a local_time)."""
+    text = str(hhmm or "00:00").strip()
+    parts = text.split(":")
+    try:
+        hour = int(parts[0])
+        minute = int(parts[1]) if len(parts) > 1 else 0
+        second = int(parts[2]) if len(parts) > 2 else 0
+    except (TypeError, ValueError, IndexError):
+        return "00:00:00"
+    return f"{hour:02d}:{minute:02d}:{second:02d}"
+
+
+def _end_from_duration(start: str, duration: int) -> str:
+    try:
+        sh, sm = (int(x) for x in start.split(":")[:2])
+    except (ValueError, AttributeError):
+        sh, sm = 0, 0
+    total = (sh * 60 + sm + max(1, int(duration))) % (24 * 60)
+    return f"{total // 60:02d}:{total % 60:02d}"
+
+
+def _window_object(name: str, schedule_type: str, time_window: dict,
+                   recurrence_range: dict, day: Optional[str] = None) -> dict:
+    recurrence = {"timeWindow": time_window, "recurrenceRange": recurrence_range}
+    schedule: Dict[str, Any] = {
+        "scheduleType": schedule_type,
+        "onceRecurrence": None,
+        "dailyRecurrence": None,
+        "weeklyRecurrence": None,
+        "monthlyRecurrence": None,
+    }
+    if schedule_type == "WEEKLY":
+        schedule["weeklyRecurrence"] = dict(recurrence, dayOfWeek=day or "MONDAY")
+    else:
+        schedule["dailyRecurrence"] = recurrence
+    return {
+        "schemaId": SCHEMA,
+        "scope": "environment",
+        "value": {
+            "enabled": True,
+            "generalProperties": {
+                "name": name[:500],
+                "description": "Migrated from an AppDynamics schedule",
+                "maintenanceType": "PLANNED",
+                "suppression": "DONT_DETECT_PROBLEMS",
+                "disableSyntheticMonitorExecution": False,
+            },
+            "schedule": schedule,
+            "filters": [],
+        },
+    }
+
+
 @dataclass
 class ScheduleResult:
     windows: List[dict] = field(default_factory=list)   # Settings API bodies
@@ -156,33 +212,27 @@ def translate_schedules(text_or_doc) -> ScheduleResult:
                 "One maintenance window is emitted from the first; create additional "
                 "windows for the rest, or a single broader one if that is simpler.")
 
-        value: Dict[str, Any] = {
-            "enabled": True,
-            "generalProperties": {
-                "name": name[:500],
-                "description": "Migrated from an AppDynamics schedule",
-                "maintenanceType": "PLANNED",
-                "suppression": "DONT_DETECT_PROBLEMS",
-                "disableSyntheticMonitorExecution": False,
-            },
-            "schedule": {
-                "scheduleType": "WEEKLY" if days else "DAILY",
-                "recurrenceRange": {},
-                "dailyRecurrence": None,
-                "weeklyRecurrence": None,
-            },
-            "filters": [],
+        start_clock = _clock(start)
+        end_clock = _clock(_end_from_duration(start, duration))
+        timezone_out = timezone or "UTC"
+        recurrence_range = {
+            "scheduleStartDate": RANGE_START,
+            "scheduleEndDate": RANGE_END,
         }
-        recurrence = {
-            "timeWindow": {"startTime": start, "durationMinutes": duration,
-                           "timeZone": timezone or "UTC"},
+        time_window = {
+            "startTime": start_clock,
+            "endTime": end_clock,
+            "timeZone": timezone_out,
         }
-        if days:
-            value["schedule"]["weeklyRecurrence"] = dict(recurrence, days=days)
-        else:
-            value["schedule"]["dailyRecurrence"] = recurrence
 
-        res.windows.append({"schemaId": SCHEMA, "scope": "environment", "value": value})
+        if days:
+            for day in days:
+                title = name if len(days) == 1 else f"{name} — {day.title()}"
+                res.windows.append(_window_object(
+                    title, "WEEKLY", time_window, recurrence_range, day=day))
+        else:
+            res.windows.append(_window_object(
+                name, "DAILY", time_window, recurrence_range))
 
         if not timezone:
             res.report.warn(
@@ -218,18 +268,22 @@ def render_schedules(res: ScheduleResult, source: str = "") -> str:
 
     if res.windows:
         L += [f"## Windows ({len(res.windows)})", "",
-              "| Name | Starts | Duration | Days | Timezone |", "|---|---|---|---|---|"]
+              "| Name | Starts | Ends | Days | Timezone |", "|---|---|---|---|---|"]
         for body in res.windows:
             v = body["value"]
             sched = v["schedule"]
             block = sched.get("weeklyRecurrence") or sched.get("dailyRecurrence") or {}
             tw = block.get("timeWindow", {})
-            days = ", ".join(d[:3].title() for d in block.get("days", [])) or "every day"
+            if sched.get("scheduleType") == "WEEKLY":
+                days = (block.get("dayOfWeek") or "")[:3].title() or "—"
+            else:
+                days = "every day"
             L.append(f"| {v['generalProperties']['name']} | {tw.get('startTime', '—')} | "
-                     f"{tw.get('durationMinutes', '—')} min | {days} | "
+                     f"{tw.get('endTime', '—')} | {days} | "
                      f"{tw.get('timeZone', '—')} |")
         L += ["",
-              "Deploy by POSTing the accompanying `.windows.json` to "
+              "Deploy by applying the `terraform/` module (`maintenance.tf`) or by "
+              "POSTing the accompanying `.windows.json` to "
               "`{env}/api/v2/settings/objects` with the `settings.write` scope.", ""]
 
     notes = res.report.format_deduped()

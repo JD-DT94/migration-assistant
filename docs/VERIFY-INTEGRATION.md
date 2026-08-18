@@ -9,10 +9,11 @@ gates, and the web GUI verify path in **migration-assistant** (`e2d`).
 e2d migrate samples/ -o out/ [--heal] [--verify] [--env-url URL] [--data]
   │
   ├─ classify → translate → offline lint (dql/validate.py)
-  ├─ write artifacts (dashboards/, queries/, alerts/, pipelines/, terraform/)
+  ├─ write artifacts (dashboards/, queries/, alerts/, pipelines/)
   ├─ [optional] heal_output_dir() — deterministic fixes on disk
   ├─ [optional] run_verify_sweep() → query:verify per DQL artifact
   ├─ [optional] re-heal failed queries → re-verify (max 3 rounds)
+  ├─ refresh Terraform DQL/sidecars from healed files → write terraform/
   └─ MIGRATION_REPORT.md + migration_report.json
 ```
 

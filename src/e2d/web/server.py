@@ -176,8 +176,17 @@ class Sessions:
             for p in sorted(dirs["out"].rglob("*")):
                 if p.is_file():
                     zf.write(p, p.relative_to(dirs["out"]))
+        tf_dir = dirs["out"] / "terraform"
+        tf_archive = None
+        if tf_dir.is_dir() and any(tf_dir.glob("*.tf")):
+            tf_archive = dirs["out"].parent / "terraform-module.zip"
+            with zipfile.ZipFile(tf_archive, "w", zipfile.ZIP_DEFLATED) as zf:
+                for p in sorted(tf_dir.rglob("*")):
+                    if p.is_file():
+                        zf.write(p, Path("terraform") / p.relative_to(tf_dir))
         with self._lock:
             self._sessions[sid]["zip"] = archive
+            self._sessions[sid]["tfzip"] = tf_archive
         from e2d.remediation import remediations_for_notes
         items = []
         for it in summary.items:
@@ -210,6 +219,8 @@ class Sessions:
                 for a in summary.healing_applied
             ],
             "download": f"/download/{sid}",
+            "download_terraform": (
+                f"/download/{sid}/terraform" if tf_archive else ""),
         }
 
     def verify(self, sid: str, cfg: dict) -> dict:
@@ -231,6 +242,12 @@ class Sessions:
         zip_path = self._dirs(sid).get("zip")
         if not zip_path or not zip_path.exists():
             raise KeyError("nothing to download")
+        return zip_path.read_bytes()
+
+    def download_terraform(self, sid: str) -> bytes:
+        zip_path = self._dirs(sid).get("tfzip")
+        if not zip_path or not zip_path.exists():
+            raise KeyError("no terraform module")
         return zip_path.read_bytes()
 
     # -- deploy converted dashboards to Dynatrace (creds kept in memory) ----- #
@@ -419,15 +436,23 @@ def make_handler(sessions: Sessions):
             if self.path == "/" or self.path == "/index.html":
                 self._send(200, PAGE.encode("utf-8"), "text/html; charset=utf-8")
             elif self.path.startswith("/download/"):
-                sid = self.path[len("/download/"):]
+                rest = self.path[len("/download/"):].strip("/")
+                parts = rest.split("/")
+                sid = parts[0]
+                kind = parts[1] if len(parts) > 1 else ""
                 try:
-                    data = sessions.download(sid)
+                    if kind == "terraform":
+                        data = sessions.download_terraform(sid)
+                        filename = "terraform-module.zip"
+                    else:
+                        data = sessions.download(sid)
+                        filename = "converted.zip"
                 except KeyError:
                     self._json(404, {"error": "not found"})
                     return
                 self.send_response(200)
                 self.send_header("Content-Type", "application/zip")
-                self.send_header("Content-Disposition", "attachment; filename=converted.zip")
+                self.send_header("Content-Disposition", f"attachment; filename={filename}")
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
                 self.wfile.write(data)
@@ -657,6 +682,9 @@ PAGE = r"""<!DOCTYPE html>
          border-radius:10px; text-decoration:none; font-weight:650; font-size:14px;
          box-shadow:0 1px 2px rgba(0,0,0,.4); }
   a.dl:hover { filter:brightness(1.07); }
+  .dls { display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin-top:18px; }
+  .dls a.dl { margin-top:0; }
+  a.dl.tf { background:linear-gradient(180deg,#4d8dff,#2b6fe0); color:#07121f; }
   .err-box { color:var(--err); margin-top:12px; }
   /* per-item result cards */
   .item { border:1px solid var(--line); border-radius:12px; margin-top:10px; overflow:hidden;
@@ -836,10 +864,10 @@ PAGE = r"""<!DOCTYPE html>
 <main class="wrap" id="app" data-plat="home">
   <div class="hero v v-home">
     <h1>Elastic &amp; AppDynamics &#8594; Dynatrace</h1>
-    <p class="tagline">Convert your source platform's dashboards, alerts, queries and
-       configuration into Dynatrace equivalents, pull straight from a live estate, and push
-       the results to a tenant.
-       <strong>Everything runs on this machine.</strong> Nothing is uploaded anywhere.</p>
+    <p class="tagline">Convert Elastic and AppDynamics configuration into a
+       <strong>Dynatrace Terraform module</strong> you can copy into a repo and apply.
+       Dashboards, detectors, pipelines, SLOs and maintenance windows ship as one child module.
+       Everything runs on this machine. Nothing is uploaded anywhere.</p>
   </div>
 
   <div class="picker v v-home">
@@ -866,7 +894,7 @@ PAGE = r"""<!DOCTYPE html>
     <div class="hero platintro">
       <h1>Elastic &#8594; Dynatrace</h1>
       <p class="tagline">Kibana dashboards, queries, ingest pipelines, watchers, transforms,
-         SLOs and Beats configs.</p>
+         SLOs and Beats configs &mdash; exported as a Terraform child module.</p>
     </div>
     <div class="egrow note">Try an example:
       <button class="egchip" data-eg="dashboard">dashboard</button>
@@ -885,7 +913,7 @@ PAGE = r"""<!DOCTYPE html>
     <div class="hero platintro">
       <h1>AppDynamics &#8594; Dynatrace</h1>
       <p class="tagline">Health rules, custom dashboards, policies and actions &mdash; and an
-         onboarding plan that sizes the OneAgent rollout by host.</p>
+         onboarding plan that sizes the OneAgent rollout by host. The export is Terraform.</p>
     </div>
     <div class="egrow note">Try an example:
       <button class="egchip" data-eg="appdrule">health rules</button>
@@ -962,8 +990,10 @@ PAGE = r"""<!DOCTYPE html>
         percentiles missing a rollup. Findings land in the report next to the artifact.</li>
       <li><b>Report.</b> A scorecard, a deployment order, and per-artifact notes saying
         exactly what a human still has to decide.</li>
-      <li><b>Deploy.</b> Upload-ready JSON, an importable Terraform module, or a direct
-        push &mdash; your choice, per run.</li>
+      <li><b>Deploy.</b> The run writes one importable Terraform child module
+        under <code>terraform/</code> &mdash; copy it into a repo or apply via
+        <code>example-root/</code>. Upload-ready JSON and a direct push stay available
+        as supporting paths.</li>
     </ol>
 
     <h3 class="map-h">Four honest categories</h3>
@@ -1001,42 +1031,15 @@ PAGE = r"""<!DOCTYPE html>
 
   <details class="card v v-conv" id="howto-card" style="margin-top:16px">
     <summary class="h">How to deploy what you downloaded</summary>
-    <p class="note">The converted files fall into three groups, each with its own route into
-       Dynatrace. Everything below is a one-time setup per environment.</p>
+    <p class="note">The primary export is the Terraform child module in
+       <code>terraform/</code>. JSON and a local push are supporting routes for the same
+       objects. Everything below is a one-time setup per environment.</p>
 
-    <h3 class="map-h">1. Dashboards &mdash; <code>dashboards/*.json</code></h3>
-    <p class="note">Each file is a bare dashboard document, so the Dashboards app imports it
-       directly and names it after the file.</p>
-    <ul class="howto">
-      <li><b>In the UI:</b> Dashboards app &rarr; <b>Upload</b> &rarr; pick the
-        <code>.json</code>. Nothing else to configure.</li>
-      <li><b>Via API:</b> <code>POST {env}/platform/document/v1/documents</code> as
-        <code>multipart/form-data</code> with <code>name</code>, <code>type=dashboard</code>
-        and the file as <code>content</code>. Token scope:
-        <code>document:documents:write</code>.</li>
-    </ul>
-
-    <h3 class="map-h">2. Settings objects &mdash; <code>*.detectors.json</code>,
-        <code>*.pipeline.json</code>, <code>*.windows.json</code></h3>
-    <p class="note">These files <em>are</em> the request body &mdash; a JSON array of
-       <code>{schemaId, scope, value}</code> objects. Post one file, get one or more
-       configuration objects.</p>
-    <ul class="howto">
-      <li><code>POST {env}/api/v2/settings/objects</code> with
-        <code>Content-Type: application/json</code> and the file as the body.
-        Token scope: <code>settings:objects:write</code>.</li>
-      <li>Covers Davis anomaly detectors (from alerts and health rules), OpenPipeline
-        pipelines, and maintenance windows (from AppD schedules).</li>
-      <li>A <code>207</code> response is normal for a multi-object body &mdash; check each
-        entry's <code>code</code>, because one object can fail while the rest succeed.</li>
-      <li>Detectors converted from a dynamic threshold ship <b>disabled</b> on purpose, with
-        a <code>0</code> placeholder. Set a real threshold before enabling.</li>
-    </ul>
-
-    <h3 class="map-h">3. Terraform &mdash; <code>terraform/</code></h3>
-    <p class="note">One <b>child module</b> for the whole run, not a folder per artifact.
-       It declares which provider it needs but configures none, so it drops into an
-       existing repository and inherits your provider setup &mdash; no duplicate
+    <h3 class="map-h">1. Terraform &mdash; <code>terraform/</code> (the export)</h3>
+    <p class="note">One <b>child module</b> for the whole run: dashboards, detectors,
+       pipelines, workflows, request attributes, SLOs and maintenance windows. It declares
+       which provider it needs but configures none, so it drops into an existing repository
+       and inherits your provider setup &mdash; no duplicate
        <code>terraform&nbsp;{}</code> block to collide with yours.</p>
     <pre class="cmdblock">module "migrated" {
   source = "./modules/migrated"
@@ -1054,15 +1057,44 @@ PAGE = r"""<!DOCTYPE html>
       <li><b>Detectors are created disabled</b> by default. Enabling hundreds at once pages
         people about a system nobody has validated, and Davis needs 7&ndash;14 days before
         its baselines are trustworthy. Set <code>detectors_enabled = true</code> per wave.</li>
-      <li><b>Anomaly detectors and request attributes</b> use an API token:
+      <li><b>Anomaly detectors, documents and request attributes</b> use an API token:
         <code>DYNATRACE_ENV_URL</code> and <code>DYNATRACE_API_TOKEN</code>.</li>
-      <li><b>OpenPipeline</b> needs an OAuth client instead, not a token:
-        <code>DT_CLIENT_ID</code>, <code>DT_CLIENT_SECRET</code>,
+      <li><b>OpenPipeline, Workflows and platform SLOs</b> need an OAuth client or platform
+        token: <code>DT_CLIENT_ID</code>, <code>DT_CLIENT_SECRET</code>,
         <code>DT_ACCOUNT_ID</code>, with scopes
         <code>openpipeline:configurations:read</code> and
         <code>&hellip;:write</code>.</li>
       <li>No Terraform state story yet? Choose <b>JSON only</b> in the export selector and
         skip this section entirely.</li>
+    </ul>
+
+    <h3 class="map-h">2. Dashboards as JSON &mdash; <code>dashboards/*.json</code></h3>
+    <p class="note">Optional if you apply the module. Each file is a bare dashboard document,
+       so the Dashboards app imports it directly and names it after the file.</p>
+    <ul class="howto">
+      <li><b>In the UI:</b> Dashboards app &rarr; <b>Upload</b> &rarr; pick the
+        <code>.json</code>. Nothing else to configure.</li>
+      <li><b>Via API:</b> <code>POST {env}/platform/document/v1/documents</code> as
+        <code>multipart/form-data</code> with <code>name</code>, <code>type=dashboard</code>
+        and the file as <code>content</code>. Token scope:
+        <code>document:documents:write</code>.</li>
+    </ul>
+
+    <h3 class="map-h">3. Settings objects &mdash; <code>*.detectors.json</code>,
+        <code>*.pipeline.json</code>, <code>*.windows.json</code></h3>
+    <p class="note">Optional if you apply the module. These files <em>are</em> the request
+       body &mdash; a JSON array of <code>{schemaId, scope, value}</code> objects. Post one
+       file, get one or more configuration objects.</p>
+    <ul class="howto">
+      <li><code>POST {env}/api/v2/settings/objects</code> with
+        <code>Content-Type: application/json</code> and the file as the body.
+        Token scope: <code>settings:objects:write</code>.</li>
+      <li>Covers Davis anomaly detectors (from alerts and health rules), OpenPipeline
+        pipelines, and maintenance windows (from AppD schedules).</li>
+      <li>A <code>207</code> response is normal for a multi-object body &mdash; check each
+        entry's <code>code</code>, because one object can fail while the rest succeed.</li>
+      <li>Detectors converted from a dynamic threshold ship <b>disabled</b> on purpose, with
+        a <code>0</code> placeholder. Set a real threshold before enabling.</li>
     </ul>
 
     <h3 class="map-h">Order matters</h3>
@@ -1590,7 +1622,11 @@ function render(d) {
     h += `<h2>Not converted</h2><ul>` +
          d.skipped.map(s=>`<li class="note"><code>${esc(s)}</code></li>`).join("") + `</ul>`;
   }
-  h += `<a class="dl" href="${d.download}">Download converted artifacts (.zip)</a>`;
+  h += `<div class="dls">`;
+  if (d.download_terraform) {
+    h += `<a class="dl tf" href="${d.download_terraform}">Download Terraform module (.zip)</a>`;
+  }
+  h += `<a class="dl" href="${d.download}">Download all converted artifacts (.zip)</a></div>`;
   h += deployPanel(d);
   result.innerHTML = h;
   result.classList.remove("hide");
@@ -1607,8 +1643,9 @@ function deployPanel(d) {
     <summary class="h">Deploy to Dynatrace</summary>
     <p class="note">Pushes <b>${nDash} dashboard(s)</b> (Document API) and the anomaly detectors from
       <b>${nAlert} alert(s)</b> (Settings API) straight to your tenant. Credentials persist on this
-      machine only. ${nPipe ? `The <b>${nPipe}</b> pipeline(s) deploy via <code>terraform apply</code>;
-      download the bundle.` : ""}</p>
+      machine only. The Terraform module is the durable export
+      ${nPipe ? ` — including the <b>${nPipe}</b> pipeline(s)` : ""}
+      ${d.download_terraform ? ` (<a href="${d.download_terraform}">download it</a>)` : " (download the bundle)"}.</p>
     <p class="note">Token scopes: <code>document:documents:write</code>,
       <code>settings:objects:write</code>, <code>storage:*:read</code>,
       <code>davis:analyzers:execute</code>.</p>
