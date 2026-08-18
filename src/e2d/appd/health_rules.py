@@ -146,12 +146,15 @@ def _scope_sentence(scope: Dict[str, str], metric_scope: Dict[str, str]) -> str:
 
 
 def _convert_condition(cond: dict, severity: str, rule_name: str,
-                       report: Report) -> Tuple[Optional[Detector], Optional[Threshold],
+                       report: Report,
+                       baseline_detectors: bool = False) -> Tuple[Optional[Detector], Optional[Threshold],
                                                 Optional[str], Dict[str, str]]:
     """One AppD condition -> at most one Detector.
 
     Returns `(detector, threshold, davis_builtin, metric_scope)`. A returned
     `davis_builtin` (with no detector) means Dynatrace already covers it.
+    ``baseline_detectors`` opts in to converting baseline conditions even where
+    built-in Davis coverage exists (custom scope/window/severity needs).
     """
     name = str(_get(cond, "name", "shortName", default="condition"))
     detail = _get(cond, "evalDetail", default={}) or {}
@@ -181,12 +184,14 @@ def _convert_condition(cond: dict, severity: str, rule_name: str,
         baseline_name = _get(eval_detail, "baselineName", default="")
         unit = str(_get(eval_detail, "baselineUnit", default="") or "").lower()
         amount = _get(eval_detail, "compareValue", default="")
-        if mapping.davis_builtin:
+        if mapping.davis_builtin and not baseline_detectors:
             report.info(
                 f"Condition `{name}` compares against an AppD baseline "
-                f"({amount} {unit or 'units'} from `{baseline_name or 'baseline'}`). This is "
-                f"covered out of the box by {mapping.davis_builtin} — tune sensitivity there "
-                "rather than recreating the rule.")
+                f"({amount} {unit or 'units'} from `{baseline_name or 'baseline'}`). "
+                f"Recommended: leave this to {mapping.davis_builtin} — recreating it would "
+                "duplicate coverage and add noise. If you need a custom scope, window or "
+                "severity, re-run with baseline-detector conversion enabled to convert it "
+                "to an auto-adaptive detector anyway.")
             return None, None, mapping.davis_builtin, metric_scope
 
         # No built-in Davis coverage, but the metric resolves: convert to an
@@ -206,6 +211,9 @@ def _convert_condition(cond: dict, severity: str, rule_name: str,
             analyzer=AUTO_ADAPTIVE_ANALYZER,
             signal_fluctuations=fluctuations,
         )
+        duplicate_note = (
+            f" NOTE: {mapping.davis_builtin} also covers this signal — disable the duplicate "
+            "or the built-in to avoid double alerting." if mapping.davis_builtin else "")
         report.info(
             f"Condition `{name}` compared against an AppD baseline ({amount} "
             f"{unit or 'units'} from `{baseline_name or 'baseline'}`). Converted to an "
@@ -213,7 +221,7 @@ def _convert_condition(cond: dict, severity: str, rule_name: str,
             f"learned from the previous 7 days and the AppD deviation count became "
             f"`numberOfSignalFluctuations: {fluctuations}`. The detector fires on 3 "
             "violating minutes in any 5-minute window. Davis needs ~7 days of metric data "
-            "before this baseline is trustworthy — expect noise in week one.")
+            f"before this baseline is trustworthy — expect noise in week one.{duplicate_note}")
         return detector, None, None, metric_scope
 
     # -- static thresholds: the real conversion ----------------------------- #
@@ -262,8 +270,12 @@ def _convert_condition(cond: dict, severity: str, rule_name: str,
     return detector, threshold, None, metric_scope
 
 
-def translate_health_rule(text_or_doc, name: Optional[str] = None) -> HealthRuleResult:
-    """Translate one AppD health rule (JSON text or already-parsed dict)."""
+def translate_health_rule(text_or_doc, name: Optional[str] = None,
+                          baseline_detectors: bool = False) -> HealthRuleResult:
+    """Translate one AppD health rule (JSON text or already-parsed dict).
+
+    ``baseline_detectors=True`` converts baseline conditions on built-in-covered
+    metrics too (auto-adaptive detectors) instead of reporting them as covered."""
     import json
 
     report = Report()
@@ -323,7 +335,7 @@ def translate_health_rule(text_or_doc, name: Optional[str] = None) -> HealthRule
 
         for cond in conds:
             detector, threshold, covered, mscope = _convert_condition(
-                cond, severity, rule_name, report)
+                cond, severity, rule_name, report, baseline_detectors=baseline_detectors)
             metric_scope.update(mscope)
             if covered:
                 covered_by.append(covered)

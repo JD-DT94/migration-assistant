@@ -90,7 +90,44 @@ def test_baseline_on_builtin_metric_is_covered_out_of_the_box():
     res = translate_health_rule(_baseline_rule("Average Response Time (ms)"))
     assert res.classification == "covered-by-davis"
     assert res.spec.detectors == []
-    assert any("covered out of the box" in n for n in res.report.format_deduped())
+    notes = " ".join(res.report.format_deduped())
+    assert "Recommended: leave this to" in notes
+    assert "baseline-detector conversion" in notes  # the opt-in path is signposted
+
+
+def test_baseline_on_builtin_metric_converts_when_opted_in():
+    res = translate_health_rule(_baseline_rule("Average Response Time (ms)", sigmas=3),
+                                baseline_detectors=True)
+    assert res.classification == "converted"
+    assert len(res.spec.detectors) == 1
+    det = res.spec.detectors[0]
+    assert det.analyzer == AUTO_ADAPTIVE_ANALYZER
+    assert det.signal_fluctuations == "3"
+    assert det.metric_key == "dt.service.request.response_time"
+    notes = " ".join(res.report.format_deduped())
+    assert "also covers this signal" in notes  # duplicate-coverage warning
+
+
+def test_baseline_on_builtin_metric_migrate_end_to_end(tmp_path):
+    from e2d.migrate import run_migration
+    indir = tmp_path / "in"
+    indir.mkdir()
+    (indir / "rules.json").write_text(json.dumps(
+        [_baseline_rule("Average Response Time (ms)")]), encoding="utf-8")
+
+    # default: covered, nothing emitted
+    out1 = tmp_path / "out1"
+    s1 = run_migration(str(indir), str(out1))
+    assert s1.appd_davis_covered == 1
+    assert not (out1 / "alerts" / "rules.detectors.json").exists()
+
+    # opted in: auto-adaptive detector emitted
+    out2 = tmp_path / "out2"
+    s2 = run_migration(str(indir), str(out2), baseline_detectors=True)
+    assert s2.appd_davis_covered == 0
+    body = json.loads((out2 / "alerts" / "rules.detectors.json").read_text())
+    assert len(body) == 1
+    assert body[0]["value"]["analyzer"]["name"] == AUTO_ADAPTIVE_ANALYZER
 
 
 def test_baseline_on_other_metric_converts_to_auto_adaptive():

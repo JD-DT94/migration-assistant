@@ -474,7 +474,8 @@ def _safe_stem(name: str) -> str:
 
 
 def _do_appd_health_rule(text: str, src: str, out: Path, config: MappingConfig,
-                         summary: MigrationSummary, emit: str = "both") -> None:
+                         summary: MigrationSummary, emit: str = "both",
+                         baseline_detectors: bool = False) -> None:
     """AppD health rules -> Davis anomaly detectors (reusing the alert pipeline)."""
     from e2d.appd.health_rules import translate_health_rule, render_health_rule
     from e2d.alerts.model import STATIC_ANALYZER
@@ -496,7 +497,8 @@ def _do_appd_health_rule(text: str, src: str, out: Path, config: MappingConfig,
     settings_bodies: List[dict] = []
 
     for i, doc in enumerate(docs):
-        res = translate_health_rule(doc, name=f"{base}-{i + 1}")
+        res = translate_health_rule(doc, name=f"{base}-{i + 1}",
+                                    baseline_detectors=baseline_detectors)
         stem = _safe_stem(res.spec.name) or f"{base}-{i + 1}"
         (adir / f"{stem}.healthrule.md").write_text(render_health_rule(res), encoding="utf-8")
         outs.append(f"alerts/{stem}.healthrule.md")
@@ -954,7 +956,8 @@ def run_migration(in_dir: str, out_dir: str, config: Optional[MappingConfig] = N
                   env_url: Optional[str] = None, token: Optional[str] = None,
                   verify_data: bool = False, heal: bool = False,
                   heal_rules: Optional[Tuple[str, ...]] = None,
-                  heal_dry_run: bool = False) -> MigrationSummary:
+                  heal_dry_run: bool = False,
+                  baseline_detectors: bool = False) -> MigrationSummary:
     """`emit` picks the deployable-artifact flavour for alerts and pipelines:
     "json" (Settings-API upload files), "tf" (Terraform modules) or "both".
 
@@ -969,7 +972,11 @@ def run_migration(in_dir: str, out_dir: str, config: Optional[MappingConfig] = N
     on disk before (and between) verify passes. ``heal_rules`` limits which
     fixers run; ``heal_dry_run`` computes fixes without writing files.
     Actions are recorded in ``healing_applied`` on the summary and in
-    ``migration_report.json``."""
+    ``migration_report.json``.
+
+    When ``baseline_detectors`` is True, AppD baseline health rules convert to
+    auto-adaptive detectors even where built-in Davis coverage exists (the
+    default reports them as covered out of the box)."""
     if emit not in ("json", "tf", "both"):
         emit = "both"
     root = Path(in_dir)
@@ -1026,7 +1033,8 @@ def run_migration(in_dir: str, out_dir: str, config: Optional[MappingConfig] = N
             elif kind in ("ilm_policy", "index_template", "enrich_policy"):
                 _do_config_advice(text, rel, kind, out, summary)
             elif kind == "appd_health_rule":
-                _do_appd_health_rule(text, rel, out, config, summary, emit)
+                _do_appd_health_rule(text, rel, out, config, summary, emit,
+                                     baseline_detectors=baseline_detectors)
             elif kind == "appd_dashboard":
                 _do_appd_dashboard(text, rel, out, config, summary)
             elif kind == "appd_inventory":

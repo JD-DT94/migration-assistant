@@ -250,6 +250,7 @@ def cmd_migrate(args: argparse.Namespace) -> int:
         heal=getattr(args, "heal", False),
         heal_rules=_parse_heal_rules(getattr(args, "heal_rules", None)),
         heal_dry_run=getattr(args, "heal_dry_run", False),
+        baseline_detectors=getattr(args, "baseline_detectors", False),
     )
     c = summary.counts()
     print(f"\nMigrated {len(summary.items)} item(s): "
@@ -355,6 +356,7 @@ def cmd_assess(args: argparse.Namespace) -> int:
             heal=getattr(args, "heal", False),
             heal_rules=_parse_heal_rules(getattr(args, "heal_rules", None)),
             heal_dry_run=getattr(args, "heal_dry_run", False),
+            baseline_detectors=getattr(args, "baseline_detectors", False),
         )
         payload = report_payload(summary)
     sc = payload["scorecard"]
@@ -483,6 +485,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Env var holding the platform token for --verify (default: DT_API_TOKEN)")
     m.add_argument("--data", action="store_true",
                    help="With --verify, also execute queries and flag valid-but-empty results")
+    m.add_argument("--baseline-detectors", action="store_true",
+                   help="Convert AppD baseline rules to auto-adaptive detectors even where "
+                        "built-in Davis coverage exists (default: report them as covered)")
     m.add_argument("-v", "--verbose", action="store_true", help="(reserved) show INFO notes")
     m.set_defaults(func=cmd_migrate)
 
@@ -538,6 +543,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Env var holding the platform token for --verify")
     ax.add_argument("--data", action="store_true",
                     help="With --verify, flag valid-but-empty queries")
+    ax.add_argument("--baseline-detectors", action="store_true",
+                    help="Convert AppD baseline rules even where built-in Davis coverage exists")
     ax.set_defaults(func=cmd_assess)
 
     pr = sub.add_parser(

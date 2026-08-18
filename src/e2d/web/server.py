@@ -154,7 +154,8 @@ class Sessions:
                 verify: bool = False, env_url: str = "", token: str = "",
                 verify_data: bool = False,
                 heal_rules: Optional[str] = None,
-                heal_dry_run: bool = False) -> dict:
+                heal_dry_run: bool = False,
+                baseline_detectors: bool = False) -> dict:
         dirs = self._dirs(sid)
         rules = None
         if heal_rules:
@@ -167,6 +168,7 @@ class Sessions:
             env_url=env_url or None, token=token or None,
             verify_data=verify_data,
             heal_rules=rules, heal_dry_run=heal_dry_run,
+            baseline_detectors=baseline_detectors,
         )
         # bundle the outputs for download
         archive = dirs["out"].parent / "converted.zip"
@@ -453,6 +455,7 @@ def make_handler(sessions: Sessions):
                         verify_data=bool(body.get("data")),
                         heal_rules=body.get("heal_rules"),
                         heal_dry_run=bool(body.get("heal_dry_run")),
+                        baseline_detectors=bool(body.get("baseline_detectors")),
                     ))
                 elif self.path == "/verify":
                     sid = self.headers.get("X-Session", "")
@@ -1358,6 +1361,7 @@ const emitBody = () => JSON.stringify({
   env_url: deployEnv,
   token: deployToken,
   data: $("#datachk") ? $("#datachk").checked : false,
+  baseline_detectors: $("#baselinechk") ? $("#baselinechk").checked : false,
 });
 
 drop.addEventListener("click", () => picker.click());
@@ -1620,6 +1624,7 @@ function deployPanel(d) {
       <label><input type="checkbox" id="healchk"> Auto-heal DQL</label>
       <label><input type="checkbox" id="verifychk"> Verify against tenant</label>
       <label><input type="checkbox" id="datachk"> Check for empty results</label>
+      <label title="Convert AppD baseline rules to auto-adaptive detectors even where built-in Davis coverage exists"><input type="checkbox" id="baselinechk"> Convert baseline rules</label>
       <button id="verifybtn">Verify now</button>
     </div>
     ${vs.total ? `<p class="note">Last verify: ${vs.ok} ok, ${vs.invalid} invalid, ${vs.skipped} skipped${vs.empty ? `, ${vs.empty} empty` : ""}.</p>` : ""}

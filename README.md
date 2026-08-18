@@ -55,10 +55,14 @@ converter goes silently wrong:
 - **Units are rescaled.** AppD reports response time in milliseconds; the Grail
   metric `dt.service.request.response_time` is in microseconds. A 2000 ms
   threshold becomes 2000000, and the conversion is stated in the report.
-- **Baseline health rules are not converted.** A rule comparing against an AppD
-  baseline has no static threshold to carry across. Inventing one produces a
-  detector that deploys cleanly and watches the wrong thing, so these are
-  reported as already covered by built-in Davis anomaly detection.
+- **Baseline health rules become auto-adaptive detectors, or nothing at all.**
+  A rule comparing against an AppD baseline has no static threshold to carry
+  across. Where Dynatrace baselines the metric natively (service response time,
+  failure rate, host saturation) the rule is reported as covered out of the box
+  — recreating it would duplicate coverage. For any other resolvable metric it
+  converts to an **auto-adaptive** Davis detector (the AppD deviation count maps
+  to `numberOfSignalFluctuations`). Pass `--baseline-detectors` to convert even
+  the covered ones when you need a custom scope, window or severity.
 - **Nothing is entity-scoped automatically.** AppD scopes by application/tier/BT
   name and there is no reliable offline mapping to Dynatrace entities. Converted
   detectors and tiles carry their original AppD scope as a note for a human to

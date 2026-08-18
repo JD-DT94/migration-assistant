@@ -108,7 +108,7 @@ def test_baseline_rule_produces_no_detector():
     # inventing a static threshold here is the failure mode being guarded
     assert res.spec.detectors == []
     notes = " ".join(res.report.format_deduped())
-    assert "covered out of the box" in notes
+    assert "Recommended: leave this to" in notes
     assert "Davis" in notes
 
 
