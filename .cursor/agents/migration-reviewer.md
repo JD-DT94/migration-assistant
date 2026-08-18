@@ -42,7 +42,9 @@ src/e2d/
 4. **Write** typed artifacts (`dashboards/`, `alerts/`, …)
 5. **Heal / verify** (optional) — mutates artifacts on disk
 6. **Refresh Terraform DQL** from healed files, then **write `terraform/`**
-7. **Report** `MIGRATION_REPORT.md` + `migration_report.json`
+7. **Report** `MIGRATION_REPORT.md` + `migration_report.json` — must lead with
+   **Your Terraform repo** (absolute path, file listing, copy / git init / apply;
+   never a push from this tool)
 
 Terraform **must be written after heal**, so HCL matches healed DQL.
 
@@ -60,7 +62,7 @@ Terraform **must be written after heal**, so HCL matches healed DQL.
 1. **Understand the change** — `git diff` in context of the pipeline above
 2. **Trace the artifact** — classify → translator → lint → heal → **Terraform emit** → apply
 3. **Ask the Terraform question first** — is this kind in `TerraformModule`? Child-module conventions? Unique `ident()`? Sidecar files (`documents/*.json`) named after the final resource id?
-4. **Visual** — GUI/site copy, download buttons, README in the emitted module: does it present Terraform as the export?
+4. **Visual** — GUI/site copy, download buttons, README in the emitted module: does it present Terraform as the export? Can the caller find `out/terraform/`, download it, copy it, or `git init` it without hunting?
 5. **Functional** — verify/heal, settings persistence, deploy, CI `terraform validate`
 6. **Coverage** — which input shapes still become REVIEW/MANUAL that could become a real resource?
 7. **Run tests** — `pytest tests/ -x` plus `tests/test_terraform_module.py`

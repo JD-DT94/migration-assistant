@@ -93,6 +93,7 @@ def report_payload(summary) -> dict:
         "skipped": summary.skipped,
         "secrets": sorted(set(summary.secrets)),
         "plan": build_plan(summary),
+        "out_dir": getattr(summary, "out_dir", ""),
         "healing_applied": [
             act.to_dict() if hasattr(act, "to_dict") else act
             for act in getattr(summary, "healing_applied", [])

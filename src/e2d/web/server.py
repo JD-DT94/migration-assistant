@@ -11,6 +11,9 @@ Design notes
 * **Raw-body uploads.** Browsers POST each file's raw bytes with the name in an
   `X-Filename` header, so we avoid a multipart parser (the stdlib `cgi` helper is
   gone in 3.13). The server reuses the same `run_migration` core as the CLI.
+* **Project inbox.** `serve()` keeps uploads in ``sources/`` under the working
+  directory (or ``E2D_PROJECT_DIR``) and rebuilds ``out/terraform/`` from that
+  whole inbox on every Convert. Unit tests still use ephemeral temp dirs.
 * **Untrusted input.** Session ids, filenames, and zip member paths are all
   validated against path traversal before they touch the filesystem.
 """
@@ -31,9 +34,11 @@ from typing import Dict, List, Optional
 
 from e2d.config import MappingConfig
 from e2d.migrate import run_migration
+from e2d.project import describe_project, ensure_layout
 
 _ZIP_MAGIC = b"PK\x03\x04"
 _SESSION_RE = re.compile(r"^[a-zA-Z0-9_-]{8,64}$")
+_PERSIST_SID = "e2d-project"
 _MAX_UPLOAD = 200 * 1024 * 1024  # 200 MB ceiling per file — a sane guard, not a real limit
 
 
@@ -82,28 +87,60 @@ def _read_artifacts(out_dir: Path, outputs: List[str]) -> List[dict]:
 
 
 class Sessions:
-    """Owns per-upload temp directories and runs migrations against them.
+    """Owns the conversion inbox and runs migrations against it.
 
     Kept deliberately separate from the HTTP handler so it can be unit-tested
     without opening a socket.
+
+    * Tests (``persist=None``): one temp dir per session, deleted on ``close()``.
+    * ``e2d web`` (``persist=project_dir``): ``sources/`` and ``out/`` on disk.
+      Uploads append; Convert rebuilds ``out/`` from the whole inbox. Closing
+      the server does not delete the project.
     """
 
-    def __init__(self, config: Optional[MappingConfig] = None):
+    def __init__(self, config: Optional[MappingConfig] = None,
+                 persist: Optional[Path] = None):
         self.config = config or MappingConfig()
-        self._base = Path(tempfile.mkdtemp(prefix="e2d-web-"))
+        self.persist = Path(persist).resolve() if persist is not None else None
+        self._scratch = Path(tempfile.mkdtemp(prefix="e2d-web-"))
         self._sessions: Dict[str, Dict[str, Path]] = {}
         self._lock = threading.Lock()
 
     # -- lifecycle ---------------------------------------------------------- #
 
     def new(self) -> str:
+        if self.persist is not None:
+            return self._open_project()
         sid = secrets.token_urlsafe(12)
-        sdir = self._base / sid
+        sdir = self._scratch / sid
         (sdir / "in").mkdir(parents=True)
         (sdir / "out").mkdir(parents=True)
         with self._lock:
             self._sessions[sid] = {"in": sdir / "in", "out": sdir / "out"}
         return sid
+
+    def _open_project(self) -> str:
+        sources, out = ensure_layout(self.persist)
+        rec: Dict[str, Path] = {"in": sources, "out": out}
+        e2d = self.persist / ".e2d"
+        z, tz = e2d / "converted.zip", e2d / "terraform-module.zip"
+        if z.is_file():
+            rec["zip"] = z
+        if tz.is_file():
+            rec["tfzip"] = tz
+        with self._lock:
+            self._sessions[_PERSIST_SID] = rec
+        return _PERSIST_SID
+
+    def open(self) -> dict:
+        """Create or reuse a session and describe the inbox + last export."""
+        sid = self.new()
+        return self.describe(sid)
+
+    def describe(self, sid: str) -> dict:
+        dirs = self._dirs(sid)
+        return {"session": sid, **describe_project(
+            dirs["in"], dirs["out"], persist=self.persist)}
 
     def _dirs(self, sid: str) -> Dict[str, Path]:
         if not _SESSION_RE.match(sid or ""):
@@ -114,7 +151,18 @@ class Sessions:
             return self._sessions[sid]
 
     def close(self) -> None:
-        shutil.rmtree(self._base, ignore_errors=True)
+        shutil.rmtree(self._scratch, ignore_errors=True)
+
+    def clear_sources(self, sid: str) -> dict:
+        """Empty the inbox. The last ``out/terraform/`` stays until Convert."""
+        indir = self._dirs(sid)["in"]
+        if indir.is_dir():
+            for child in indir.iterdir():
+                if child.is_dir():
+                    shutil.rmtree(child, ignore_errors=True)
+                else:
+                    child.unlink(missing_ok=True)
+        return self.describe(sid)
 
     # -- uploads ------------------------------------------------------------ #
 
@@ -162,24 +210,31 @@ class Sessions:
             from e2d.dql.heal import HEAL_RULES
             wanted = {r.strip() for r in heal_rules.split(",") if r.strip()}
             rules = tuple(r for r in HEAL_RULES if r in wanted) or None
+        # Rebuild out/ from the whole inbox so leftover artifacts from a
+        # previous, larger set of sources do not linger.
+        out = dirs["out"]
+        if out.exists():
+            shutil.rmtree(out)
+        out.mkdir(parents=True)
         summary = run_migration(
-            str(dirs["in"]), str(dirs["out"]), self.config, emit=emit,
+            str(dirs["in"]), str(out), self.config, emit=emit,
             heal=heal, verify=verify,
             env_url=env_url or None, token=token or None,
             verify_data=verify_data,
             heal_rules=rules, heal_dry_run=heal_dry_run,
             baseline_detectors=baseline_detectors,
         )
-        # bundle the outputs for download
-        archive = dirs["out"].parent / "converted.zip"
+        zip_dir = (self.persist / ".e2d") if self.persist is not None else out.parent
+        zip_dir.mkdir(parents=True, exist_ok=True)
+        archive = zip_dir / "converted.zip"
         with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
-            for p in sorted(dirs["out"].rglob("*")):
+            for p in sorted(out.rglob("*")):
                 if p.is_file():
-                    zf.write(p, p.relative_to(dirs["out"]))
-        tf_dir = dirs["out"] / "terraform"
+                    zf.write(p, p.relative_to(out))
+        tf_dir = out / "terraform"
         tf_archive = None
         if tf_dir.is_dir() and any(tf_dir.glob("*.tf")):
-            tf_archive = dirs["out"].parent / "terraform-module.zip"
+            tf_archive = zip_dir / "terraform-module.zip"
             with zipfile.ZipFile(tf_archive, "w", zipfile.ZIP_DEFLATED) as zf:
                 for p in sorted(tf_dir.rglob("*")):
                     if p.is_file():
@@ -187,6 +242,7 @@ class Sessions:
         with self._lock:
             self._sessions[sid]["zip"] = archive
             self._sessions[sid]["tfzip"] = tf_archive
+            self._sessions[sid]["out"] = out
         from e2d.remediation import remediations_for_notes
         items = []
         for it in summary.items:
@@ -221,6 +277,7 @@ class Sessions:
             "download": f"/download/{sid}",
             "download_terraform": (
                 f"/download/{sid}/terraform" if tf_archive else ""),
+            **describe_project(dirs["in"], out, persist=self.persist),
         }
 
     def verify(self, sid: str, cfg: dict) -> dict:
@@ -314,7 +371,8 @@ class Sessions:
                  "dlq": 0, "note": "", "errors": [], "sample": None,
                  "dql_count": None}
                 for s in cfg.get("selection", []) if s.get("index")]
-        sdir = self._base / sid
+        sdir = self._scratch / sid
+        sdir.mkdir(parents=True, exist_ok=True)
         for n, row in enumerate(rows):
             row["state_path"] = str(sdir / f"bf-{n}.state.json")
         if not rows:
@@ -462,7 +520,10 @@ def make_handler(sessions: Sessions):
         def do_POST(self):  # noqa: N802
             try:
                 if self.path == "/session":
-                    self._json(200, {"session": sessions.new()})
+                    self._json(200, sessions.open())
+                elif self.path == "/clear-sources":
+                    sid = self.headers.get("X-Session", "")
+                    self._json(200, sessions.clear_sources(sid))
                 elif self.path == "/upload":
                     sid = self.headers.get("X-Session", "")
                     name = self.headers.get("X-Filename", "upload.dat")
@@ -529,11 +590,26 @@ def make_handler(sessions: Sessions):
 
 def serve(host: str = "127.0.0.1", port: int = 8765, open_browser: bool = True,
           config: Optional[MappingConfig] = None) -> None:
-    """Run the local GUI until interrupted. Blocks the calling thread."""
-    sessions = Sessions(config)
+    """Run the local GUI until interrupted. Blocks the calling thread.
+
+    Uploads accumulate in ``sources/`` under the current project directory
+    (cwd, or ``E2D_PROJECT_DIR``). Convert rebuilds ``out/terraform/`` from
+    that whole inbox. Closing the server leaves the project on disk.
+    """
+    from e2d.project import project_dir, terraform_dir
+
+    root = project_dir()
+    ensure_layout(root)
+    sessions = Sessions(config, persist=root)
     httpd = ThreadingHTTPServer((host, port), make_handler(sessions))
     url = f"http://{host}:{port}/"
+    tf = terraform_dir(root=root)
     print(f"e2d web GUI running at {url}  (offline — data stays on this machine)")
+    print(f"Project {root}")
+    print(f"  sources/        drop exports here — they accumulate")
+    print(f"  out/terraform/  the exportable repo (rebuilt on Convert)")
+    if tf.is_dir() and any(tf.glob("*.tf")):
+        print(f"  last module     {tf}")
     print("Press Ctrl-C to stop.")
     if open_browser:
         import webbrowser
@@ -879,6 +955,17 @@ PAGE = r"""<!DOCTYPE html>
   .export p { margin:0; font-size:13px; color:var(--mut); line-height:1.5; }
   .export .dls { margin-top:0; }
   .kinds { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
+  .tfpath { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-top:10px !important; }
+  .tfpath code { word-break:break-all; }
+  .tftree { margin-top:10px; }
+  .tftree summary { cursor:pointer; color:var(--mut); font-size:13px; }
+  .tftree pre { margin:8px 0 0; max-height:220px; overflow:auto; font-size:12px;
+                background:rgba(0,0,0,.25); padding:10px 12px; border-radius:8px; }
+  .next { margin:10px 0 0; padding-left:18px; font-size:13px; color:var(--mut); }
+  .next li { margin:4px 0; }
+  .inbox { margin:10px 0 0; padding:10px 12px; border:1px dashed var(--line2);
+           border-radius:10px; }
+  .inbox .files { margin:6px 0 0; }
   @media (prefers-reduced-motion: reduce) {
     .pcard, .feat, .item-head .chev { transition:none; }
     .pcard:hover, .feat:hover { transform:none; }
@@ -979,6 +1066,9 @@ PAGE = r"""<!DOCTYPE html>
         <polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
       </svg>
       <strong>Drop files here</strong> or click to choose
+      <p class="note" style="margin:6px 0 0">They accumulate in this project's
+         <code>sources/</code> folder. Convert rebuilds <code>out/terraform/</code>
+         from everything so far.</p>
       <p class="note v v-elastic" style="margin:6px 0 0">Kibana dashboards &middot; ES|QL
          &middot; Query DSL &middot; KQL/Lucene &middot; Logstash &middot; watchers &middot;
          transforms &middot; SLOs &middot; Beats configs &middot; ILM policies</p>
@@ -986,6 +1076,10 @@ PAGE = r"""<!DOCTYPE html>
          &middot; application/tier/node inventory &middot; policies &amp; actions, exported
          as JSON from the Controller</p>
       <input type="file" id="picker" multiple class="hide">
+    </div>
+    <div class="inbox hide" id="inbox">
+      <p class="note" id="inbox-note" style="margin:0"></p>
+      <ul class="files" id="projectfiles"></ul>
     </div>
     <ul class="files" id="filelist"></ul>
     <div class="conn">
@@ -995,6 +1089,7 @@ PAGE = r"""<!DOCTYPE html>
         <option value="tf">Terraform only</option>
       </select>
       <button id="go" disabled>Convert</button>
+      <button id="clear-src" class="copy hide">Clear project files</button>
     </div>
     <div class="err-box hide" id="err"></div>
   </div>
@@ -1023,6 +1118,20 @@ PAGE = r"""<!DOCTYPE html>
   <details class="card v v-conv" id="how-card" style="margin-top:16px">
     <summary class="h">How it works, and what it will not do</summary>
 
+    <h3 class="map-h">What you do</h3>
+    <ol class="stages">
+      <li><b>Add.</b> Drop exports into this project. They stay in
+        <code>sources/</code> and accumulate across Converts.</li>
+      <li><b>Convert.</b> Rebuilds one Terraform child module from everything so far
+        under <code>out/terraform/</code>.</li>
+      <li><b>Take it.</b> Download the zip, copy the folder, or
+        <code>git init</code> there and push to your own repo. This tool never pushes
+        for you.</li>
+      <li><b>Apply.</b> <code>terraform plan</code> from <code>example-root/</code>,
+        or add <code>module "migrated"</code> to an existing repo.</li>
+    </ol>
+
+    <h3 class="map-h">What the converter does</h3>
     <ol class="stages">
       <li><b>Identify.</b> Every file is classified by its own contents, not its name or
         the tab you are on. A mixed drop of Elastic and AppDynamics exports sorts itself
@@ -1405,13 +1514,43 @@ const $ = s => document.querySelector(s);
 const drop = $("#drop"), picker = $("#picker"), filelist = $("#filelist"),
       go = $("#go"), err = $("#err"), result = $("#stage-result");
 let chosen = [];
+let projectSession = null;
+let sourcesCount = 0;
 
+function canConvert() {
+  return chosen.length > 0 || sourcesCount > 0;
+}
 function showFiles() {
   filelist.innerHTML = chosen.map(f =>
     `<li>${esc(f.name)} <span class="note">${(f.size/1024|0)} KB</span></li>`).join("");
-  go.disabled = chosen.length === 0;
+  go.disabled = !canConvert();
 }
 function addFiles(list) { chosen = chosen.concat([...list]); showFiles(); }
+function paintInbox(info) {
+  sourcesCount = info.sources_count || 0;
+  const box = $("#inbox"), list = $("#projectfiles"), note = $("#inbox-note");
+  const clearBtn = $("#clear-src");
+  if (!sourcesCount) {
+    box.classList.add("hide");
+    clearBtn.classList.add("hide");
+    showFiles();
+    return;
+  }
+  box.classList.remove("hide");
+  clearBtn.classList.remove("hide");
+  const where = info.sources_dir ? ` in <code>${esc(info.sources_dir)}</code>` : "";
+  note.innerHTML = `${sourcesCount} file(s) already in this project${where}. Convert rebuilds the Terraform repo from all of them.`;
+  list.innerHTML = (info.sources || []).map(n => `<li>${esc(n)}</li>`).join("");
+  showFiles();
+}
+async function ensureSession() {
+  if (projectSession) return projectSession;
+  const info = await post("/session");
+  projectSession = info.session;
+  paintInbox(info);
+  return projectSession;
+}
+ensureSession().catch(() => {});
 
 // ---- platform tabs ---------------------------------------------------
 // The tab only decides which sections are on screen. Conversion always
@@ -1479,10 +1618,22 @@ window.addEventListener("DOMContentLoaded", () => {
   emitSel.addEventListener("change", () => LS.setItem("e2d_emit", emitSel.value));
 });
 
+$("#clear-src").addEventListener("click", async () => {
+  try {
+    const session = await ensureSession();
+    const info = await post("/clear-sources", "", { "X-Session": session });
+    chosen = [];
+    paintInbox(info);
+  } catch (e) {
+    err.textContent = "Could not clear project files: " + e.message;
+    err.classList.remove("hide");
+  }
+});
+
 go.addEventListener("click", async () => {
   err.classList.add("hide"); go.disabled = true; go.textContent = "Converting…";
   try {
-    const { session } = await post("/session");
+    const session = await ensureSession();
     currentSession = session;
     const toSend = chosen.slice();
     if (mapHasRules() && !toSend.some(f => f.name === "mapping.config.json"))
@@ -1493,12 +1644,14 @@ go.addEventListener("click", async () => {
     }
     const data = await post("/migrate", emitBody(),
                             { "X-Session": session, "Content-Type": "application/json" });
+    chosen = [];
+    paintInbox(data);
     render(data);
   } catch (e) {
     err.textContent = "Something went wrong: " + e.message;
     err.classList.remove("hide");
   } finally {
-    go.disabled = false; go.textContent = "Convert";
+    go.disabled = !canConvert(); go.textContent = "Convert";
   }
 });
 
@@ -1508,7 +1661,7 @@ $("#discover").addEventListener("click", async () => {
   const btn = $("#discover"); btn.disabled = true; btn.textContent = "Connecting…";
   const disc = $("#discovery");
   try {
-    const { session } = await post("/session");
+    const session = await ensureSession();
     pulledSession = session;
     await post("/connect", JSON.stringify({
       kibana_url: $("#kibana_url").value.trim(), es_url: $("#es_url").value.trim(),
@@ -1550,6 +1703,7 @@ async function pullAndConvert() {
     currentSession = pulledSession;
     const data = await post("/migrate", emitBody(),
                             { "X-Session": pulledSession, "Content-Type": "application/json" });
+    paintInbox(data);
     render(data);
   } catch (e) {
     $("#discovery").innerHTML += `<p class="err-box">Pull failed: ${esc(e.message)}</p>`;
@@ -1638,7 +1792,7 @@ function terraformKinds(d) {
 }
 
 function exportBar(d) {
-  if (!d.download && !d.download_terraform) return "";
+  if (!d.download && !d.download_terraform && !d.terraform_path) return "";
   const kinds = terraformKinds(d);
   const chips = kinds.length
     ? `<div class="kinds">${kinds.map(k => `<span class="outcome">${esc(k)}</span>`).join("")}</div>`
@@ -1649,10 +1803,28 @@ function exportBar(d) {
   if (d.download)
     buttons += `<a class="dl" href="${d.download}">All artifacts</a>`;
   buttons += `</div>`;
-  const lead = d.download_terraform
+  const path = d.terraform_path
+    ? `<p class="tfpath"><code id="tfpath">${esc(d.terraform_path)}</code>
+       <button class="copy" data-copy-path>Copy path</button></p>`
+    : "";
+  const tree = (d.terraform_tree||[]).length
+    ? `<details class="tftree"><summary>${d.terraform_files.length} files in the module</summary>
+       <pre>${esc((d.terraform_tree||[]).join("\n"))}</pre></details>`
+    : "";
+  const next = (d.download_terraform || d.terraform_path) ? `
+    <ol class="next">
+      <li>Copy the folder into your infra repo, or download the zip.</li>
+      <li>Add <code>module "migrated"</code> (see How to deploy), or
+          <code>cd example-root && terraform init && terraform plan</code>.</li>
+      <li>To push elsewhere: <code>cd</code> into the module,
+          <code>git init</code>, add your remote, <code>git push</code>.
+          e2d never pushes for you.</li>
+    </ol>` : "";
+  const lead = (d.download_terraform || d.terraform_path)
     ? `<h3>Your Terraform module is ready</h3>
        <p>A child module you can copy into a repo or apply from <code>example-root/</code>.
-          Detectors stay off until you flip <code>detectors_enabled</code>.</p>${chips}`
+          Detectors stay off until you flip <code>detectors_enabled</code>.
+          This folder is rebuilt from every file in the project.</p>${chips}${path}${tree}${next}`
     : `<h3>Converted artifacts</h3>
        <p>Download the bundle. Choose Terraform in the export selector to get an applyable module.</p>`;
   return `<div class="export"><div class="lead">${lead}</div>${buttons}</div>`;
@@ -1849,6 +2021,13 @@ async function copyText(text, btn) {
 
 // one delegated listener handles toggles, copy buttons, and expand/collapse-all
 result.addEventListener("click", e => {
+  const pathBtn = e.target.closest("[data-copy-path]");
+  if (pathBtn) {
+    e.stopPropagation();
+    const code = document.getElementById("tfpath");
+    if (code) copyText(code.textContent, pathBtn);
+    return;
+  }
   const copyBtn = e.target.closest("[data-copy]");
   if (copyBtn) {
     e.stopPropagation();
@@ -1986,7 +2165,7 @@ $("#bf_discover").addEventListener("click", async () => {
   const btn = $("#bf_discover"); btn.disabled = true; btn.textContent = "Discovering…";
   const list = $("#bf_list");
   try {
-    if (!bfSession) bfSession = (await post("/session")).session;
+    if (!bfSession) bfSession = (await ensureSession());
     const data = await post("/backfill/discover", JSON.stringify({
       es_url: $("#es_url").value.trim(), token: $("#token").value,
       auth_scheme: $("#auth_scheme").value,

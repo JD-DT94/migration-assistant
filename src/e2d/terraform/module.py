@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -357,6 +358,10 @@ needs a human decision, and the plan is the last place to catch them cheaply.
 
     def write(self, out_dir: str) -> Dict[str, object]:
         d = Path(out_dir)
+        # Rebuild the module directory from this run so leftover group files
+        # (detectors.tf, documents/…) from a previous, larger inbox do not linger.
+        if d.exists():
+            shutil.rmtree(d)
         d.mkdir(parents=True, exist_ok=True)
         written: List[str] = []
 

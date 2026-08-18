@@ -10,6 +10,7 @@ venv/
 
 # Conversion output (generated)
 /out/
+/sources/
 /dt_dashboards/
 /tf_out/
 *.local.json

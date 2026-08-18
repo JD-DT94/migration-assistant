@@ -121,7 +121,11 @@ def test_deployment_instructions_cover_all_three_routes(name):
 def test_how_it_works_explains_the_pipeline_and_the_boundary(name):
     html = PAGES[name]
     assert 'id="how-card"' in html
-    # the five stages, so someone can reason about where their artifact went
+    # the four user steps, so someone can follow the project without reading the engine
+    for step in ("Add", "Convert", "Take it", "Apply"):
+        assert f"<b>{step}.</b>" in html, step
+    assert "never pushes" in html
+    # the five engine stages, so someone can reason about where their artifact went
     for stage in ("Identify", "Translate", "Lint", "Report", "Deploy"):
         assert f"<b>{stage}.</b>" in html, stage
     # the four honest categories, including the one that saves the most time

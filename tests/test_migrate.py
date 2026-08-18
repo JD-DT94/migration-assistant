@@ -43,6 +43,24 @@ def test_report_renders_plain_english():
     assert md.index("Deploy ingest pipelines") < md.index("Import dashboards")
 
 
+def test_report_leads_with_terraform_repo(tmp_path):
+    (tmp_path / "in").mkdir()
+    (tmp_path / "in" / "web.conf").write_text(
+        'input { beats { port => 5044 } }\n'
+        'filter { grok { match => { "message" => "%{IPORHOST:clientip}" } } }\n'
+        'output { elasticsearch { hosts => ["es:9200"] } }\n',
+        encoding="utf-8")
+    s = run_migration(str(tmp_path / "in"), str(tmp_path / "out"))
+    report = (tmp_path / "out" / "MIGRATION_REPORT.md").read_text(encoding="utf-8")
+    assert "## Your Terraform repo" in report
+    tf = (tmp_path / "out" / "terraform").resolve()
+    assert str(tf) in report
+    assert "never pushes" in report
+    assert "git init" in report
+    assert 'module "migrated"' in report
+    assert s.out_dir == str((tmp_path / "out").resolve())
+
+
 def test_classify_recognises_more_shapes(tmp_path):
     from e2d.migrate import classify
     # Kibana NDJSON saved with a .json extension

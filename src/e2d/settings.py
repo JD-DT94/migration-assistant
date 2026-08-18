@@ -12,10 +12,11 @@ writes back and updates the cache.
 from __future__ import annotations
 
 import json
-import os
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
+
+from e2d.project import project_dir
 
 
 @dataclass
@@ -45,15 +46,8 @@ _SETTINGS_FILE = "project.json"
 _settings_cache: Optional[ProjectSettings] = None
 
 
-def _project_dir() -> Path:
-    override = os.environ.get("E2D_PROJECT_DIR")
-    if override:
-        return Path(override)
-    return Path.cwd()
-
-
 def _settings_path() -> Path:
-    return _project_dir() / ".e2d" / _SETTINGS_FILE
+    return project_dir() / ".e2d" / _SETTINGS_FILE
 
 
 def load_project_settings() -> ProjectSettings:

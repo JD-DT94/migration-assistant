@@ -266,6 +266,8 @@ def cmd_migrate(args: argparse.Namespace) -> int:
         print(f"Healed: {len(summary.healing_applied)} auto-fix(es) applied — see report",
               file=sys.stderr)
     print(f"Report -> {Path(args.output) / 'MIGRATION_REPORT.md'}", file=sys.stderr)
+    from e2d.project import render_handoff_banner
+    print(render_handoff_banner(Path(args.output)), file=sys.stderr, end="")
     if summary.secrets:
         print(f"⚠ {len(set(summary.secrets))} possible secret(s) seen in inputs (not copied to outputs) "
               "— see the report's Security section.", file=sys.stderr)

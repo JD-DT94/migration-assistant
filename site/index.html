@@ -178,6 +178,16 @@
   .feat p { margin:0; font-size:13px; line-height:1.62; color:var(--mut); }
   .feat p b { color:#9fc3f5; font-weight:600; }
   .alsonote { color:var(--mut); font-size:13.5px; margin-top:14px; }
+  .export { display:flex; flex-wrap:wrap; gap:14px; align-items:center;
+            margin:0 0 22px; padding:16px 18px; border-radius:14px;
+            border:1px solid rgba(77,141,255,.28);
+            background:linear-gradient(180deg,rgba(77,141,255,.12),rgba(77,141,255,.04)); }
+  .export .lead { flex:1 1 240px; min-width:0; }
+  .export h3 { margin:0 0 4px; font-size:15.5px; font-weight:650; }
+  .export p { margin:0; font-size:13px; color:var(--mut); line-height:1.5; }
+  .dls { display:flex; flex-wrap:wrap; gap:10px; align-items:center; }
+  .next { margin:10px 0 0; padding-left:18px; font-size:13px; color:var(--mut); }
+  .next li { margin:4px 0; }
 
   /* how-it-works stages */
   .stages { counter-reset:stage; list-style:none; margin:14px 0 4px; padding:0; }
@@ -391,6 +401,9 @@
         <polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
       </svg>
       <strong>Drop your exports here</strong> or click to choose
+      <div class="hint">They accumulate in this tab. Convert rebuilds one Terraform
+        module from everything so far. Download the zip to take it with you &mdash;
+        this page cannot keep a folder on disk.</div>
       <div class="hint v v-elastic">Kibana <code>.ndjson</code> &middot; ES|QL / Query DSL /
         KQL &middot; Logstash <code>.conf</code> &middot; watchers &middot; transforms &middot;
         SLOs &middot; <code>filebeat.yml</code>. Single files or a <code>.zip</code>.
@@ -407,7 +420,8 @@
         <option value="tf">Terraform only</option>
       </select>
       <button id="convert" disabled>Convert</button>
-      <button id="download" disabled>Download results (.zip)</button>
+      <button id="download-tf" disabled>Download Terraform module</button>
+      <button id="download" disabled>All artifacts (.zip)</button>
       <button id="reset" class="ghost">Reset</button>
       <span id="status">Loading Python engine…</span>
     </div>
@@ -442,6 +456,19 @@
   <details class="panel v v-conv" id="how-card" style="margin-top:16px">
     <summary class="h">How it works, and what it will not do</summary>
 
+    <h3 class="map-h">What you do</h3>
+    <ol class="stages">
+      <li><b>Add.</b> Drop exports into this tab. They stay and accumulate until Reset.</li>
+      <li><b>Convert.</b> Rebuilds one Terraform child module from everything so far.</li>
+      <li><b>Take it.</b> Download the Terraform module zip &mdash; this page cannot keep
+        a folder. Unzip it, copy it into a repo, or <code>git init</code> and push.
+        This tool never pushes for you. For a project folder that grows on disk, run
+        <code>e2d web</code> locally.</li>
+      <li><b>Apply.</b> <code>terraform plan</code> from <code>example-root/</code>,
+        or add <code>module "migrated"</code> to an existing repo.</li>
+    </ol>
+
+    <h3 class="map-h">What the converter does</h3>
     <ol class="stages">
       <li><b>Identify.</b> Every file is classified by its own contents, not its name or
         the tab you are on. A mixed drop of Elastic and AppDynamics exports sorts itself
@@ -899,6 +926,14 @@ if out.exists():
     shutil.rmtree(out)
 s = run_migration('/work/in', '/work/out', config=cfg, emit='${emit}')
 shutil.make_archive('/work/converted', 'zip', '/work/out')
+import zipfile as _zf
+_tf = Path('/work/out/terraform')
+_has_tf = _tf.is_dir() and any(_tf.glob('*.tf'))
+if _has_tf:
+    with _zf.ZipFile('/work/terraform-module.zip', 'w', _zf.ZIP_DEFLATED) as _z:
+        for _p in sorted(_tf.rglob('*')):
+            if _p.is_file():
+                _z.write(_p, Path('terraform') / _p.relative_to(_tf))
 from e2d.plan import build_plan
 from e2d.score import build_scorecard, scorecard_line
 items = []
@@ -912,10 +947,12 @@ for i in s.items:
 json.dumps({'counts': s.counts(), 'items': items,
             'skipped': s.skipped, 'secrets': s.secrets, 'plan': build_plan(s),
             'unmatched': s.unmatched_indexes,
-            'scorecard_line': scorecard_line(build_scorecard(s))})
+            'scorecard_line': scorecard_line(build_scorecard(s)),
+            'has_terraform': _has_tf})
 `);
     render(JSON.parse(out));
     $("download").disabled = false;
+    $("download-tf").disabled = !JSON.parse(out).has_terraform;
     setStatus("Done.");
   } catch (e) {
     setStatus("Conversion failed: " + e.message.split("\n").slice(-2).join(" "));
@@ -956,7 +993,23 @@ function render(r) {
     `<span class="REVIEW tag">REVIEW ${r.counts.REVIEW}</span>` +
     `<span class="MANUAL tag">MANUAL ${r.counts.MANUAL}</span>` +
     `<span class="ERROR tag">ERROR ${r.counts.ERROR}</span>`;
-  let html = r.scorecard_line
+  let html = "";
+  if (r.has_terraform) {
+    html += `<div class="export"><div class="lead">
+      <h3>Your Terraform module is ready</h3>
+      <p>Download the zip, unzip it, and copy <code>terraform/</code> into a repo
+         or apply from <code>example-root/</code>. This page cannot keep a folder.
+         This tool never pushes for you.</p>
+      <ol class="next">
+        <li>Download the Terraform module zip (or all artifacts).</li>
+        <li>Add <code>module "migrated"</code> (see How to deploy), or
+            <code>cd example-root && terraform init && terraform plan</code>.</li>
+        <li>To push elsewhere: unzip, <code>git init</code>, add your remote,
+            <code>git push</code>.</li>
+      </ol>
+    </div></div>`;
+  }
+  html += r.scorecard_line
     ? `<p class="note" style="margin:0 0 10px">${esc(r.scorecard_line)}</p>` : "";
   html += tuneBlock(r);
   html += planBlock(r.plan);
@@ -1015,6 +1068,13 @@ function download() {
   a.href = url; a.download = "converted.zip"; a.click();
   URL.revokeObjectURL(url);
 }
+function downloadTf() {
+  const data = py.FS.readFile("/work/terraform-module.zip");
+  const url = URL.createObjectURL(new Blob([data], { type: "application/zip" }));
+  const a = document.createElement("a");
+  a.href = url; a.download = "terraform-module.zip"; a.click();
+  URL.revokeObjectURL(url);
+}
 
 function reset() {
   if (!py) return;
@@ -1025,7 +1085,7 @@ shutil.rmtree('/work/out', ignore_errors=True)
 pathlib.Path('/work/in').mkdir(parents=True)
 `);
   nFiles = 0;
-  $("convert").disabled = true; $("download").disabled = true;
+  $("convert").disabled = true; $("download").disabled = true; $("download-tf").disabled = true;
   $("report").hidden = true; $("report-lab").hidden = true;
   $("items").innerHTML = ""; $("counts").innerHTML = "";
   setStatus("Ready. Drop your Elastic exports.");
@@ -1086,6 +1146,7 @@ drop.ondragleave = () => drop.classList.remove("hot");
 drop.ondrop = e => { e.preventDefault(); drop.classList.remove("hot"); addFiles(e.dataTransfer.files); };
 $("convert").onclick = convert;
 $("download").onclick = download;
+$("download-tf").onclick = downloadTf;
 $("reset").onclick = reset;
 // ---- try-an-example buttons ---------------------------------------------
 const EX_QUERY = "FROM logs-* | WHERE status >= 500 | STATS errors = COUNT() BY service.name | SORT errors DESC | LIMIT 10";

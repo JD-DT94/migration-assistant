@@ -171,3 +171,57 @@ def test_http_round_trip(live_server):
         assert r.headers["Content-Type"] == "application/zip"
         with zipfile.ZipFile(io.BytesIO(r.read())) as zf:
             assert "MIGRATION_REPORT.md" in zf.namelist()
+
+
+PIPE = (b'input { beats { port => 5044 } }\n'
+        b'filter { grok { match => { "message" => "%{IPORHOST:clientip}" } } }\n'
+        b'output { elasticsearch { hosts => ["es:9200"] } }\n')
+
+
+def test_persist_accumulates_and_rebuilds_the_module(tmp_path):
+    s = Sessions(persist=tmp_path)
+    try:
+        info = s.open()
+        sid = info["session"]
+        assert sid == "e2d-project"
+        assert info["sources_count"] == 0
+        s.add_file(sid, "web.conf", PIPE)
+        r1 = s.migrate(sid)
+        assert r1["total"] == 1
+        assert r1["sources_count"] == 1
+        assert (tmp_path / "sources" / "web.conf").is_file()
+        tf = tmp_path / "out" / "terraform"
+        assert tf.is_dir() and any(tf.glob("*.tf"))
+        assert r1["terraform_path"] == str(tf.resolve())
+        assert r1["download_terraform"]
+        s.add_file(sid, "q.esql", ESQL)
+        r2 = s.migrate(sid)
+        assert r2["sources_count"] == 2
+        assert r2["total"] == 2
+        assert (tf / "pipelines.tf").is_file()
+    finally:
+        s.close()
+    # closing the GUI must not delete the project
+    assert (tmp_path / "sources" / "web.conf").is_file()
+    assert (tmp_path / "out" / "terraform" / "versions.tf").is_file()
+    s2 = Sessions(persist=tmp_path)
+    try:
+        again = s2.open()
+        assert again["sources_count"] == 2
+        assert again["terraform_path"]
+    finally:
+        s2.close()
+
+
+def test_clear_sources_empties_inbox_not_last_module(tmp_path):
+    s = Sessions(persist=tmp_path)
+    try:
+        sid = s.new()
+        s.add_file(sid, "web.conf", PIPE)
+        s.migrate(sid)
+        info = s.clear_sources(sid)
+        assert info["sources_count"] == 0
+        assert not (tmp_path / "sources" / "web.conf").exists()
+        assert (tmp_path / "out" / "terraform" / "versions.tf").is_file()
+    finally:
+        s.close()

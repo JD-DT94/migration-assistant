@@ -14,7 +14,7 @@ e2d migrate samples/ -o out/ [--heal] [--verify] [--env-url URL] [--data]
   ├─ [optional] run_verify_sweep() → query:verify per DQL artifact
   ├─ [optional] re-heal failed queries → re-verify (max 3 rounds)
   ├─ refresh Terraform DQL/sidecars from healed files → write terraform/
-  └─ MIGRATION_REPORT.md + migration_report.json
+  └─ MIGRATION_REPORT.md (leads with the terraform/ path) + migration_report.json
 ```
 
 | Phase | When | Module |

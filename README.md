@@ -78,7 +78,17 @@ index patterns need rules.
 
 ## Terraform export
 
-`e2d migrate … -o out/` writes **one child module** at `out/terraform/`:
+The primary deliverable is **one child module**. `e2d migrate … -o out/` writes
+it at `out/terraform/`. `e2d web` does the same under the current directory:
+
+```
+sources/              # inbox — uploads accumulate
+out/terraform/        # THE exportable repo, rebuilt on every Convert
+.e2d/                 # tokens + download zips (gitignored)
+```
+
+Each Convert rebuilds the module from **everything in the inbox**. We do not
+merge HCL across independent runs (that would orphan or duplicate resources).
 
 ```
 out/terraform/
@@ -96,9 +106,14 @@ out/terraform/
   README.md
 ```
 
-Copy `terraform/` into an existing repo and call `module "migrated" { source = "…" }`,
-or `cd terraform/example-root && terraform init && terraform plan`. Detectors stay
-disabled until you set `detectors_enabled = true` per wave.
+**Take it with you** (the tool never `git push`es):
+
+1. Copy `out/terraform/` into an existing repo and call `module "migrated" { source = "…" }`.
+2. Or `cd out/terraform/example-root && terraform init && terraform plan`.
+3. Or `cd out/terraform && git init && git add . && git commit` and push to *your* remote.
+4. Or download `terraform-module.zip` from the GUI.
+
+Detectors stay disabled until you set `detectors_enabled = true` per wave.
 
 ## CLI
 
@@ -107,7 +122,8 @@ pip install -e .            # Python >= 3.9, stdlib only
 e2d assess <export-dir>                     # scorecard only, converts nothing
                                             # exit 0 clean / 2 manual work / 1 errors
 e2d migrate <export-dir> -o out/            # convert everything, one Terraform module
-ls out/terraform/                           # child module: copy or apply via example-root/
+ls out/terraform/                           # child module: copy, zip, or git init
+e2d web                                     # local GUI; sources/ accumulates, out/terraform/ rebuilds
 e2d dashboard export.ndjson -o out/         # dashboards only
 e2d verify out/ --env-url https://<env>.apps.dynatrace.com          # DQL check
 e2d verify out/ --data ...                  # + flag tiles that return no data

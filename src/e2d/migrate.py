@@ -99,6 +99,7 @@ class MigrationSummary:
     # One Terraform child module accumulated across the whole run, so the output
     # is a single importable module rather than a root module per artifact.
     tf_module: Any = None
+    out_dir: str = ""
 
     @property
     def products(self) -> List[str]:
@@ -1011,7 +1012,7 @@ def run_migration(in_dir: str, out_dir: str, config: Optional[MappingConfig] = N
     root = Path(in_dir)
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    summary = MigrationSummary(emit=emit)
+    summary = MigrationSummary(emit=emit, out_dir=str(out.resolve()))
     if emit in ("tf", "both"):
         from e2d.terraform.module import TerraformModule
         summary.tf_module = TerraformModule()
@@ -1169,6 +1170,10 @@ def render_report(summary: MigrationSummary) -> str:
     L.append("")
     L.append("Everything ran **on this machine, offline**; none of your data left it.")
     L.append("")
+    from e2d.project import render_handoff_md
+    if summary.out_dir:
+        L.append(render_handoff_md(Path(summary.out_dir)).rstrip())
+        L.append("")
 
     if summary.appd_hosts or summary.appd_davis_covered:
         L.append("## AppDynamics rollout sizing")

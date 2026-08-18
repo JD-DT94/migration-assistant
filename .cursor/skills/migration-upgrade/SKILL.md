@@ -47,6 +47,10 @@ JSON, Markdown guides, and live push stay as supporting paths.
 
 - Hero and “How to deploy” lead with `terraform/` (copy module or `example-root`)
 - GUI: full `converted.zip` plus `terraform-module.zip` when the module exists
+- Local `e2d web` persists `sources/` + `out/terraform/` in the project directory;
+  Convert rebuilds the module from the whole inbox. The report and export bar
+  show the absolute path, a file listing, copy-path, download, and git/apply
+  steps. The tool never `git push`es.
 - Keep `site/index.html` and `src/e2d/web/server.py` copy in agreement (tests parametrize both)
 
 ## Conversion-coverage upgrades
