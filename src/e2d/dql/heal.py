@@ -62,7 +62,9 @@ def _heal_array_arithmetic(dql: str) -> Tuple[str, List[HealAction]]:
         bare = alias.strip("`")
         ref = re.escape(bare)
         new_tail = tail
+        # alias followed by operator
         before = rf"(?<![\w.`]){ref}(?![\w.`(\[])\s*(?=[-+*/])"
+        # operator followed by alias
         after = rf"([-+*/])\s*(?<![\w.`]){ref}(?![\w.`(\[])"
         if re.search(before, new_tail):
             new_tail = re.sub(before, f"{bare}[]", new_tail)
@@ -77,7 +79,7 @@ def _heal_array_arithmetic(dql: str) -> Tuple[str, List[HealAction]]:
 
 
 def _heal_by_without_braces(dql: str) -> Tuple[str, List[HealAction]]:
-    pat = rf"\bby:\s*(?!\{{)({_IDENT})"
+    pat = rf"\bby:\s*(?!\{{)({_IDENT}(?:\s*,\s*{_IDENT})*)"
 
     def repl(m: re.Match) -> str:
         return f"by: {{{m.group(1)}}}"
@@ -143,6 +145,12 @@ def _heal_percentile_rollup(dql: str) -> Tuple[str, List[HealAction]]:
     if n:
         return new, [HealAction("percentile-needs-rollup", "",
                                 "Inserted `rollup: avg` into metric timeseries with percentile.")]
+    # no interval: — append rollup at end of timeseries command
+    new, n = re.subn(r"(\btimeseries\b[^|]*?)(\s*(?:\||$))",
+                     r"\1, rollup: avg\2", dql, count=1)
+    if n:
+        return new, [HealAction("percentile-needs-rollup", "",
+                                "Inserted `rollup: avg` into metric timeseries with percentile.")]
     return dql, []
 
 
@@ -154,7 +162,7 @@ def _heal_block_comments(dql: str) -> Tuple[str, List[HealAction]]:
         inner = m.group(1).replace("\n", " ").strip()
         return f"// {inner}" if inner else "//"
 
-    new = re.sub(r"/\*([^*]|\*+[^*/])*\*/", repl, dql)
+    new = re.sub(r"/\*(.*?)\*/", repl, dql, flags=re.S)
     if new != dql:
         return new, [HealAction("block-comment", "", "Converted block comment(s) to `//` lines.")]
     return dql, []

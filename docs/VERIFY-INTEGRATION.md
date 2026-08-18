@@ -66,12 +66,12 @@ e2d assess samples/ --heal --verify --json report.json
 | Code | Fix |
 |------|-----|
 | `array-arithmetic` | Insert `[]` on timeseries aliases in arithmetic |
-| `by-without-braces` | Wrap `by: field` → `by: {field}` |
+| `by-without-braces` | Wrap `by: field[, field2]` → `by: {field[, field2]}` |
 | `wrong-function-name` | `toLowercase`→`lower`, `toUppercase`→`upper`, `length`→`stringLength` |
 | `static-list-brackets` | `in(f, ["a"])` → `in(f, {"a"})` |
 | `assignment-in-filter` | Single `=` → `==` in filter stages |
-| `percentile-needs-rollup` | Insert `rollup: avg` before `interval:` |
-| `block-comment` | `/* … */` → `// …` |
+| `percentile-needs-rollup` | Insert `rollup: avg` before `interval:` (or at end if no interval) |
+| `block-comment` | `/* … */` → `// …` (content preserved) |
 | `verify-error` | Re-apply function renames when verify mentions unknown functions |
 
 Healing **writes back** to converted artifacts:
@@ -179,6 +179,12 @@ pip install -e ".[push,dev]"
 ```
 
 Live verify requires `[push]` (`requests`). Healing is stdlib-only.
+
+## Known limitations
+
+- **Backticked timeseries aliases** (`` `my alias` ``) are flagged by lint but not auto-healed — the fixer uses bare identifiers.
+- **Unterminated block comments** (`/* …`) are not healed (no closing `*/` to match).
+- **Verify-error healing** only covers function-name renames today; other verify errors require manual fixes.
 
 ## Not yet implemented
 
