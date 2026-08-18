@@ -61,6 +61,27 @@ class VerifyResult:
     skipped_reason: Optional[str] = None
 
 
+@dataclass
+class VerifySweepResult:
+    """One DQL artifact checked during a verify sweep (migrate or `e2d verify`)."""
+    label: str                       # relative path, e.g. dashboards/foo.json#tile:t1
+    dql: str
+    valid: Optional[bool]            # None => skipped (no creds, network, etc.)
+    errors: List[str] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
+    skipped_reason: Optional[str] = None
+    empty: Optional[bool] = None     # True when --data and query returned no rows
+
+    def to_dict(self) -> Dict[str, Any]:
+        d: Dict[str, Any] = {"label": self.label, "valid": self.valid,
+                             "errors": self.errors, "warnings": self.warnings}
+        if self.skipped_reason:
+            d["skipped_reason"] = self.skipped_reason
+        if self.empty is not None:
+            d["empty"] = self.empty
+        return d
+
+
 def _parse_verify_response(dql: str, status: int, body: Dict[str, Any]) -> VerifyResult:
     """Fold the query:verify response into a VerifyResult.
 
@@ -166,30 +187,157 @@ def execute_dql_count(env_url: str, token: str, dql: str,
         return None, f"request failed: {e}"
 
 
+def _rel_label(root: Path, f: Path, suffix: str = "") -> str:
+    try:
+        base = str(f.relative_to(root))
+    except ValueError:
+        base = f.name
+    return f"{base}{suffix}" if suffix else base
+
+
+def _split_dql_sections(text: str) -> List[Tuple[str, str]]:
+    """Split a .dql file that may contain multiple `# source` sections."""
+    parts = re.split(r"(?m)^# (.+)$", text.strip())
+    if len(parts) <= 1:
+        return [("", text.strip())] if text.strip() else []
+    out: List[Tuple[str, str]] = []
+    if parts[0].strip():
+        out.append(("", parts[0].strip()))
+    for i in range(1, len(parts), 2):
+        title = parts[i].strip()
+        body = parts[i + 1].strip() if i + 1 < len(parts) else ""
+        if body:
+            out.append((title, body))
+    return out
+
+
+def _detector_query(value: Dict[str, Any]) -> Optional[str]:
+    analyzer = value.get("analyzer") or {}
+    for inp in analyzer.get("input") or []:
+        if isinstance(inp, dict) and inp.get("key") == "query":
+            q = inp.get("value")
+            return q if isinstance(q, str) and q.strip() else None
+    return None
+
+
+def _pipeline_dql_scripts(doc: Any) -> List[Tuple[str, str]]:
+    """Extract DQL scripts from OpenPipeline Settings JSON (list or single object)."""
+    found: List[Tuple[str, str]] = []
+    entries = doc if isinstance(doc, list) else [doc]
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        value = entry.get("value") or {}
+        procs = ((value.get("processing") or {}).get("processors")) or []
+        for proc in procs:
+            if not isinstance(proc, dict) or proc.get("type") != "dql":
+                continue
+            script = (proc.get("dql") or {}).get("script")
+            pid = proc.get("id") or "proc"
+            if isinstance(script, str) and script.strip():
+                found.append((str(pid), script))
+    return found
+
+
 def _iter_dql_artifacts(input_path: str) -> List[Tuple[str, str]]:
-    """Collect (label, dql) pairs from converted artifacts under a path:
-    every `.dql` file, plus each tile query and variable input in dashboard JSON."""
+    """Collect (label, dql) pairs from converted artifacts under a path.
+
+    Sources: `.dql` files (incl. multi-section querytext output), dashboard tile
+    and variable queries, OpenPipeline `.pipeline.json` stage scripts, and Davis
+    detector queries in `.detectors.json`.
+    """
     p = Path(input_path)
+    root = p.parent if p.is_file() else p
     items: List[Tuple[str, str]] = []
-    files = [p] if p.is_file() else sorted(p.rglob("*"))
+    files = [p] if p.is_file() else sorted(root.rglob("*"))
     for f in files:
+        if not f.is_file():
+            continue
+        name = f.name
         if f.suffix == ".dql":
-            items.append((f.name, f.read_text(encoding="utf-8")))
+            try:
+                text = f.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            for section, body in _split_dql_sections(text):
+                suffix = f"#section:{section}" if section else ""
+                items.append((_rel_label(root, f, suffix), body))
+        elif name.endswith(".pipeline.json"):
+            try:
+                doc = json.loads(f.read_text(encoding="utf-8"))
+            except (ValueError, OSError):
+                continue
+            for pid, script in _pipeline_dql_scripts(doc):
+                items.append((_rel_label(root, f, f"#proc:{pid}"), script))
+        elif name.endswith(".detectors.json"):
+            try:
+                doc = json.loads(f.read_text(encoding="utf-8"))
+            except (ValueError, OSError):
+                continue
+            entries = doc if isinstance(doc, list) else [doc]
+            for i, entry in enumerate(entries):
+                if not isinstance(entry, dict):
+                    continue
+                q = _detector_query(entry.get("value") or {})
+                if q:
+                    items.append((_rel_label(root, f, f"#detector:{i}"), q))
         elif f.suffix == ".json":
             try:
                 doc = json.loads(f.read_text(encoding="utf-8"))
             except (ValueError, OSError):
                 continue
+            if name.endswith(".pipeline.json") or name.endswith(".detectors.json"):
+                continue
             content = doc.get("content", doc) if isinstance(doc, dict) else {}
+            if not isinstance(content, dict) or "tiles" not in content:
+                continue
+            rel = _rel_label(root, f)
             for key, tile in (content.get("tiles") or {}).items():
                 q = tile.get("query") if isinstance(tile, dict) else None
                 if q:
-                    items.append((f"{f.name}#tile:{key}", _substitute_variables(q)))
+                    items.append((f"{rel}#tile:{key}", _substitute_variables(q)))
             for var in content.get("variables") or []:
                 q = var.get("input") if isinstance(var, dict) else None
                 if q:
-                    items.append((f"{f.name}#var:{var.get('key', '?')}", q))
+                    items.append((f"{rel}#var:{var.get('key', '?')}", q))
     return items
+
+
+def run_verify_sweep(out_dir: str, env_url: Optional[str], token: Optional[str],
+                     check_data: bool = False) -> Tuple[List[VerifySweepResult], Dict[str, int]]:
+    """Validate every DQL artifact under *out_dir* against a Dynatrace tenant.
+
+    Returns (results, summary_counts) where summary has keys ok, invalid, skipped,
+    empty. Never raises — skipped results carry ``valid=None`` and a reason.
+    """
+    items = _iter_dql_artifacts(out_dir)
+    results: List[VerifySweepResult] = []
+    counts = {"total": len(items), "ok": 0, "invalid": 0, "skipped": 0, "empty": 0}
+    if not items:
+        return results, counts
+    for label, dql in items:
+        res = verify_dql(env_url or "", token, dql)
+        if res.valid is None:
+            results.append(VerifySweepResult(label, dql, None, res.errors, res.warnings,
+                                             res.skipped_reason))
+            counts["skipped"] += 1
+            continue
+        if not res.valid:
+            results.append(VerifySweepResult(label, dql, False, res.errors, res.warnings))
+            counts["invalid"] += 1
+            continue
+        empty: Optional[bool] = None
+        if check_data and env_url and token:
+            count, err = execute_dql_count(env_url, token, _strip_variable_filters(dql))
+            if err is None and count == 0:
+                empty = True
+                counts["empty"] += 1
+            else:
+                counts["ok"] += 1
+        else:
+            counts["ok"] += 1
+        results.append(VerifySweepResult(label, dql, True, res.errors, res.warnings, empty=empty))
+    return results, counts
 
 
 def verify_cli(args) -> int:
@@ -200,44 +348,34 @@ def verify_cli(args) -> int:
               f"in {getattr(args, 'token_env', 'DT_API_TOKEN')}", file=sys.stderr)
         return 2
 
-    items = _iter_dql_artifacts(args.input)
-    if not items:
-        print(f"No DQL artifacts (.dql / dashboard tiles) found at {args.input}", file=sys.stderr)
+    check_data = getattr(args, "data", False)
+    results, counts = run_verify_sweep(args.input, env_url, token, check_data)
+    if counts["total"] == 0:
+        print(f"No DQL artifacts found at {args.input}", file=sys.stderr)
         return 1
 
-    check_data = getattr(args, "data", False)
-    n_ok = n_bad = n_skip = n_empty = 0
-    for label, dql in items:
-        res = verify_dql(env_url, token, dql)
-        if res.valid is None:
-            print(f"[SKIP ] {label}: {res.skipped_reason}")
-            n_skip += 1
-        elif not res.valid:
-            print(f"[BAD  ] {label}: {'; '.join(res.errors) or 'invalid'}", file=sys.stderr)
-            n_bad += 1
-        elif check_data:
-            count, err = execute_dql_count(env_url, token, _strip_variable_filters(dql))
-            if err is not None:
-                print(f"[OK   ] {label}  (data check skipped: {err})")
-                n_ok += 1
-            elif count == 0:
-                print(f"[EMPTY] {label}: query is valid but returned no data in the current "
-                      "timeframe — the tile will render blank. Check the fields manifest "
-                      "(.fields.md) for attributes that may need an OpenPipeline extraction.",
-                      file=sys.stderr)
-                n_empty += 1
-            else:
-                print(f"[OK   ] {label}  (returns data)")
-                n_ok += 1
+    for vr in results:
+        if vr.valid is None:
+            print(f"[SKIP ] {vr.label}: {vr.skipped_reason}")
+        elif not vr.valid:
+            print(f"[BAD  ] {vr.label}: {'; '.join(vr.errors) or 'invalid'}", file=sys.stderr)
+        elif vr.empty:
+            print(f"[EMPTY] {vr.label}: query is valid but returned no data in the current "
+                  "timeframe — the tile will render blank. Check the fields manifest "
+                  "(.fields.md) for attributes that may need an OpenPipeline extraction.",
+                  file=sys.stderr)
         else:
-            extra = f"  ({len(res.warnings)} warning(s))" if res.warnings else ""
-            print(f"[OK   ] {label}{extra}")
-            n_ok += 1
+            extra = f"  ({len(vr.warnings)} warning(s))" if vr.warnings else ""
+            if check_data and vr.valid:
+                print(f"[OK   ] {vr.label}  (returns data){extra}")
+            else:
+                print(f"[OK   ] {vr.label}{extra}")
 
-    tail = f", {n_empty} valid-but-empty" if check_data else ""
-    print(f"\nverified {len(items)} quer(ies): {n_ok} ok, {n_bad} invalid{tail}, {n_skip} skipped",
+    tail = f", {counts['empty']} valid-but-empty" if check_data else ""
+    print(f"\nverified {counts['total']} quer(ies): {counts['ok']} ok, "
+          f"{counts['invalid']} invalid{tail}, {counts['skipped']} skipped",
           file=sys.stderr)
-    return 1 if (n_bad or n_empty) else 0
+    return 1 if (counts["invalid"] or counts["empty"]) else 0
 
 
 def push_cli(args) -> int:

@@ -13,6 +13,7 @@ Subcommands
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 from typing import List, Optional
@@ -223,16 +224,39 @@ def cmd_migrate(args: argparse.Namespace) -> int:
     if not Path(args.input).is_dir():
         print(f"error: {args.input} is not a directory", file=sys.stderr)
         return 2
-    summary = run_migration(args.input, args.output, config, emit=args.emit)
+    env_url = getattr(args, "env_url", None) or os.environ.get("DYNATRACE_ENV_URL")
+    token_env = getattr(args, "token_env", "DT_API_TOKEN")
+    token = os.environ.get(token_env) if getattr(args, "verify", False) else None
+    if getattr(args, "verify", False) and (not env_url or not token):
+        print(f"warning: --verify set but env URL or {token_env} missing — "
+              "verify will be skipped for all queries", file=sys.stderr)
+    summary = run_migration(
+        args.input, args.output, config, emit=args.emit,
+        verify=getattr(args, "verify", False),
+        env_url=env_url, token=token,
+        verify_data=getattr(args, "data", False),
+    )
     c = summary.counts()
     print(f"\nMigrated {len(summary.items)} item(s): "
           f"{c['OK']} OK, {c['REVIEW']} REVIEW, {c['MANUAL']} MANUAL, {c['ERROR']} ERROR  "
           f"| {len(summary.skipped)} skipped", file=sys.stderr)
+    if summary.verify_summary.get("total"):
+        vs = summary.verify_summary
+        print(f"Verify: {vs.get('ok', 0)} ok, {vs.get('invalid', 0)} invalid, "
+              f"{vs.get('skipped', 0)} skipped"
+              + (f", {vs.get('empty', 0)} valid-but-empty" if vs.get("empty") else ""),
+              file=sys.stderr)
     print(f"Report -> {Path(args.output) / 'MIGRATION_REPORT.md'}", file=sys.stderr)
     if summary.secrets:
         print(f"⚠ {len(set(summary.secrets))} possible secret(s) seen in inputs (not copied to outputs) "
               "— see the report's Security section.", file=sys.stderr)
-    return 1 if (args.strict and (c["MANUAL"] or c["ERROR"])) else 0
+    if args.strict and (c["MANUAL"] or c["ERROR"]):
+        return 1
+    if args.strict and summary.verify_summary.get("invalid"):
+        return 1
+    if args.strict and summary.verify_summary.get("empty"):
+        return 1
+    return 0
 
 
 def cmd_push(args: argparse.Namespace) -> int:
@@ -301,8 +325,16 @@ def cmd_assess(args: argparse.Namespace) -> int:
     if not Path(args.input).is_dir():
         print(f"error: {args.input} is not a directory", file=sys.stderr)
         return 2
+    env_url = getattr(args, "env_url", None) or os.environ.get("DYNATRACE_ENV_URL")
+    token_env = getattr(args, "token_env", "DT_API_TOKEN")
+    token = os.environ.get(token_env) if getattr(args, "verify", False) else None
     with tempfile.TemporaryDirectory() as td:
-        summary = run_migration(args.input, td, config)
+        summary = run_migration(
+            args.input, td, config,
+            verify=getattr(args, "verify", False),
+            env_url=env_url, token=token,
+            verify_data=getattr(args, "data", False),
+        )
         payload = report_payload(summary)
     sc = payload["scorecard"]
     print(scorecard_line(sc))
@@ -320,6 +352,10 @@ def cmd_assess(args: argparse.Namespace) -> int:
                                    encoding="utf-8")
         print(f"\nJSON report -> {args.json}", file=sys.stderr)
     if sc["counts"]["failed"]:
+        return 1
+    if getattr(args, "verify", False) and payload.get("verify_summary", {}).get("invalid"):
+        return 1
+    if getattr(args, "verify", False) and payload.get("verify_summary", {}).get("empty"):
         return 1
     return 2 if sc["counts"]["manual"] else 0
 
@@ -408,7 +444,15 @@ def build_parser() -> argparse.ArgumentParser:
     m.add_argument("--emit", choices=["json", "tf", "both"], default="both",
                    help="Deployable format for alerts/pipelines: 'json' = Settings-API upload "
                         "files (no Terraform needed), 'tf' = Terraform modules, 'both' (default)")
-    m.add_argument("--strict", action="store_true", help="Exit non-zero if any item is MANUAL/ERROR")
+    m.add_argument("--strict", action="store_true",
+                   help="Exit non-zero if any item is MANUAL/ERROR or verify finds invalid/empty DQL")
+    m.add_argument("--verify", action="store_true",
+                   help="After conversion, validate all DQL against the tenant (query:verify)")
+    m.add_argument("--env-url", help="Dynatrace env URL for --verify (or DYNATRACE_ENV_URL)")
+    m.add_argument("--token-env", default="DT_API_TOKEN",
+                   help="Env var holding the platform token for --verify (default: DT_API_TOKEN)")
+    m.add_argument("--data", action="store_true",
+                   help="With --verify, also execute queries and flag valid-but-empty results")
     m.add_argument("-v", "--verbose", action="store_true", help="(reserved) show INFO notes")
     m.set_defaults(func=cmd_migrate)
 
@@ -451,6 +495,13 @@ def build_parser() -> argparse.ArgumentParser:
     ax.add_argument("input", help="Folder containing Elastic and/or AppDynamics exports")
     ax.add_argument("--json", help="Write the machine-readable report to this file")
     ax.add_argument("--config", help="Mapping config JSON")
+    ax.add_argument("--verify", action="store_true",
+                    help="Validate converted DQL against the tenant after conversion")
+    ax.add_argument("--env-url", help="Dynatrace env URL for --verify (or DYNATRACE_ENV_URL)")
+    ax.add_argument("--token-env", default="DT_API_TOKEN",
+                    help="Env var holding the platform token for --verify")
+    ax.add_argument("--data", action="store_true",
+                    help="With --verify, flag valid-but-empty queries")
     ax.set_defaults(func=cmd_assess)
 
     pr = sub.add_parser(

@@ -92,6 +92,9 @@ class MigrationSummary:
     appd_waves: int = 0           # rollout waves the onboarding plan produced
     appd_kinds: List[str] = field(default_factory=list)          # AppD artifact kinds seen
     appd_rule_classes: Dict[str, int] = field(default_factory=dict)  # converted/covered/manual
+    # Live DQL verification (optional — when migrate runs with --verify)
+    verify_results: List[Any] = field(default_factory=list)
+    verify_summary: Dict[str, int] = field(default_factory=dict)
     # One Terraform child module accumulated across the whole run, so the output
     # is a single importable module rather than a root module per artifact.
     tf_module: Any = None
@@ -761,6 +764,44 @@ def _worst(a: str, b: str) -> str:
     return a if order[a] >= order[b] else b
 
 
+def _item_matches_verify_label(output: str, label: str) -> bool:
+    """True when a verify result label belongs to an item output path."""
+    if label == output or label.startswith(output + "#"):
+        return True
+    out_name = output.rsplit("/", 1)[-1]
+    label_base = label.split("#")[0]
+    return label_base.endswith("/" + out_name) or label_base == out_name
+
+
+def _apply_verify_to_items(summary: MigrationSummary) -> None:
+    """Fold live verify failures into item notes and bump status to REVIEW."""
+    for vr in summary.verify_results:
+        if vr.valid is not False:
+            continue
+        msg = f"[WARN] Live DQL verify failed ({vr.label}): " \
+              f"{'; '.join(vr.errors) or 'invalid'}"
+        matched = False
+        for it in summary.items:
+            if any(_item_matches_verify_label(o, vr.label) for o in it.outputs):
+                if msg not in it.notes:
+                    it.notes.append(msg)
+                it.status = _worst(it.status, "REVIEW")
+                matched = True
+        if not matched:
+            summary.items.append(Item("verify", vr.label, "REVIEW", [vr.label], [msg]))
+
+
+def _run_post_migration_verify(summary: MigrationSummary, out: Path,
+                               env_url: Optional[str], token: Optional[str],
+                               verify_data: bool) -> None:
+    from e2d.api.client import run_verify_sweep
+    results, counts = run_verify_sweep(str(out), env_url, token, verify_data)
+    summary.verify_results = results
+    summary.verify_summary = counts
+    if results:
+        _apply_verify_to_items(summary)
+
+
 # --------------------------------------------------------------------------- #
 # Elastic cluster-config artifacts -> Dynatrace equivalents (advice, not code)
 # --------------------------------------------------------------------------- #
@@ -861,11 +902,18 @@ def _suggest_config(summary: MigrationSummary, out: Path) -> Optional[str]:
 # --------------------------------------------------------------------------- #
 
 def run_migration(in_dir: str, out_dir: str, config: Optional[MappingConfig] = None,
-                  emit: str = "both") -> MigrationSummary:
+                  emit: str = "both", verify: bool = False,
+                  env_url: Optional[str] = None, token: Optional[str] = None,
+                  verify_data: bool = False) -> MigrationSummary:
     """`emit` picks the deployable-artifact flavour for alerts and pipelines:
     "json" (Settings-API upload files), "tf" (Terraform modules) or "both".
-    Anything else quietly falls back to "both" — a wrong value must never
-    abort a migration run."""
+
+    When ``verify`` is True, every DQL artifact written under ``out_dir`` is
+    submitted to the tenant's ``query:verify`` endpoint (requires ``env_url``
+    and ``token``). Results are stored on the summary, reflected in item
+    status/notes, and included in ``migration_report.json``. Missing creds or
+    the ``requests`` package produce skipped results — the migration still
+    completes."""
     if emit not in ("json", "tf", "both"):
         emit = "both"
     root = Path(in_dir)
@@ -983,6 +1031,9 @@ def run_migration(in_dir: str, out_dir: str, config: Optional[MappingConfig] = N
             render_coverage(summary.appd_kinds, converted=summary.appd_rule_classes),
             encoding="utf-8")
 
+    if verify:
+        _run_post_migration_verify(summary, out, env_url, token, verify_data)
+
     (out / "MIGRATION_REPORT.md").write_text(render_report(summary), encoding="utf-8")
     from e2d.score import report_payload
     (out / "migration_report.json").write_text(
@@ -1054,6 +1105,36 @@ def render_report(summary: MigrationSummary) -> str:
 
     from e2d.plan import build_plan, render_plan_md
     L.extend(render_plan_md(build_plan(summary)))
+
+    if summary.verify_results:
+        L.append("## Live DQL verification")
+        L.append("")
+        c = summary.verify_summary or {}
+        if c.get("total"):
+            L.append(f"Checked **{c['total']}** quer(ies) against the tenant: "
+                     f"**{c.get('ok', 0)}** valid, **{c.get('invalid', 0)}** invalid, "
+                     f"**{c.get('skipped', 0)}** skipped"
+                     + (f", **{c.get('empty', 0)}** valid-but-empty" if c.get("empty") else "")
+                     + ".")
+            L.append("")
+        bad = [vr for vr in summary.verify_results if vr.valid is False]
+        empty = [vr for vr in summary.verify_results if vr.empty]
+        if bad:
+            L.append("**Invalid queries (fix before deploy):**")
+            L.append("")
+            for vr in bad:
+                L.append(f"- `{vr.label}`: {'; '.join(vr.errors) or 'invalid'}")
+            L.append("")
+        if empty:
+            L.append("**Valid but empty (tile may render blank — check `.fields.md`):**")
+            L.append("")
+            for vr in empty:
+                L.append(f"- `{vr.label}`")
+            L.append("")
+        skipped = [vr for vr in summary.verify_results if vr.valid is None]
+        if skipped and not bad:
+            L.append(f"{len(skipped)} quer(ies) could not be verified (missing creds or network).")
+            L.append("")
 
     if summary.ilm_policies or summary.template_patterns:
         L.append("## Cutover")

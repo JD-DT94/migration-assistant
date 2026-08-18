@@ -79,7 +79,7 @@ def render_scorecard_md(sc: dict) -> List[str]:
 def report_payload(summary) -> dict:
     """Machine-readable run report (migration_report.json) for CI and tooling."""
     from e2d.plan import build_plan
-    return {
+    payload = {
         "tool": "e2d",
         "scorecard": build_scorecard(summary),
         "counts": summary.counts(),
@@ -94,3 +94,10 @@ def report_payload(summary) -> dict:
         "secrets": sorted(set(summary.secrets)),
         "plan": build_plan(summary),
     }
+    if getattr(summary, "verify_results", None):
+        payload["verify_summary"] = getattr(summary, "verify_summary", {})
+        payload["verify_results"] = [
+            vr.to_dict() if hasattr(vr, "to_dict") else vr
+            for vr in summary.verify_results
+        ]
+    return payload
