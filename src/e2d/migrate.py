@@ -477,6 +477,7 @@ def _do_appd_health_rule(text: str, src: str, out: Path, config: MappingConfig,
                          summary: MigrationSummary, emit: str = "both") -> None:
     """AppD health rules -> Davis anomaly detectors (reusing the alert pipeline)."""
     from e2d.appd.health_rules import translate_health_rule, render_health_rule
+    from e2d.alerts.model import STATIC_ANALYZER
     from e2d.alerts.tf import render_detectors_tf, has_terraform
 
     docs = json.loads(text)
@@ -491,6 +492,7 @@ def _do_appd_health_rule(text: str, src: str, out: Path, config: MappingConfig,
     notes: List[str] = []
     worst = "OK"
     converted = covered = manual = 0
+    auto_adaptive = 0
     settings_bodies: List[dict] = []
 
     for i, doc in enumerate(docs):
@@ -507,6 +509,8 @@ def _do_appd_health_rule(text: str, src: str, out: Path, config: MappingConfig,
             manual += 1
         else:
             converted += 1
+        auto_adaptive += sum(1 for det in res.spec.detectors
+                             if getattr(det, "analyzer", "") != STATIC_ANALYZER)
 
         if not has_terraform(res.spec):
             continue
@@ -539,8 +543,16 @@ def _do_appd_health_rule(text: str, src: str, out: Path, config: MappingConfig,
             "baseline, which built-in Davis anomaly detection already does. They need no "
             "migration — recreating them would duplicate coverage and add alert noise.")
     if converted:
-        notes.append(f"{converted} rule(s) converted to Davis anomaly detector(s) with static "
-                     "thresholds carried across (units rescaled where AppD and Dynatrace differ).")
+        static_n = converted - auto_adaptive
+        parts = []
+        if static_n:
+            parts.append(f"{static_n} with static thresholds carried across "
+                         "(units rescaled where AppD and Dynatrace differ)")
+        if auto_adaptive:
+            parts.append(f"{auto_adaptive} as auto-adaptive baseline detector(s) "
+                         "(Davis learns the baseline — expect noise in week one)")
+        notes.append(f"{converted} rule(s) converted to Davis anomaly detector(s): "
+                     + "; ".join(parts) + ".")
     if manual:
         notes.append(f"{manual} rule(s) need a manual rebuild — see the per-rule notes above.")
 

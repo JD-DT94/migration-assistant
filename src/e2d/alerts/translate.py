@@ -81,6 +81,30 @@ def _find_metric_agg(aggs: Dict[str, Any], alias: str) -> Optional[Tuple[str, Op
     return None
 
 
+_BUCKET_AGGS = ("filter", "terms", "date_histogram")
+
+
+def _find_bucket_agg(aggs: Dict[str, Any], alias: str) -> Optional[Tuple[str, Any]]:
+    """Recursively locate a bucket aggregation named `alias`; return (kind, body).
+
+    A watcher comparing `...aggregations.<name>.doc_count` thresholds the document
+    count OF that bucket agg — a `filter` agg becomes count() with the predicate
+    inlined, a `terms` agg becomes count() grouped by its field, a
+    `date_histogram` is just count() over the series interval."""
+    for name, body in (aggs or {}).items():
+        if not isinstance(body, dict):
+            continue
+        if name == alias:
+            for kind in _BUCKET_AGGS:
+                if kind in body:
+                    return kind, body[kind]
+        if "aggs" in body:
+            found = _find_bucket_agg(body["aggs"], alias)
+            if found:
+                return found
+    return None
+
+
 def is_watcher(doc: dict) -> bool:
     return isinstance(doc, dict) and "trigger" in doc and "input" in doc
 
@@ -145,8 +169,18 @@ def _watcher_thresholds(cond: Dict[str, Any], report: Report) -> List[Threshold]
     if "compare" in cond:
         out = []
         for path, ops in cond["compare"].items():
-            subject = "count" if path.endswith(("hits.total", "hits.total.value")) \
-                else path.split(".")[-2] if path.endswith(".value") else path.split(".")[-1]
+            parts = path.split(".")
+            if path.endswith(("hits.total", "hits.total.value")):
+                subject = "count"
+            elif path.endswith(".value"):
+                subject = parts[-2]
+            elif parts[-1] in ("doc_count", "doc_count_error_upper_bound",
+                               "doc_count_error_lower_bound") and len(parts) >= 2:
+                # doc_count is a synthetic property of the enclosing BUCKET agg
+                # (e.g. ...aggregations.errors.doc_count) — the subject is that agg
+                subject = parts[-2]
+            else:
+                subject = parts[-1]
             for op, val in ops.items():
                 out.append(Threshold(subject, _cmp(op), _render_value(val, report)))
         return out
@@ -253,13 +287,52 @@ def _from_watcher(doc: dict, config: MappingConfig, report: Report,
         report.warn("Watcher `transform` (Painless) builds a breaching list; in Dynatrace the event's "
                     "dimension split does this — usually unnecessary.")
 
-    spec.detectors = _watcher_detectors(spec, body, report)
+    spec.detectors = _watcher_detectors(spec, body, report, config)
     spec.actions = _actions_from_watcher(doc.get("actions", {}), report)
     spec.target = _recommend_target(spec, doc)
     return spec
 
 
-def _watcher_detectors(spec: AlertSpec, body: Dict[str, Any], report: Report) -> List[Detector]:
+def _bucket_doc_count_detector(t: Threshold, bucket: Tuple[str, Any],
+                               base: List[str], spec: AlertSpec,
+                               config: MappingConfig, report: Report) -> Optional[Detector]:
+    """A `doc_count` threshold on a bucket agg -> a per-minute count() series."""
+    from e2d.core.filter_ir import emit_filter
+    from e2d.core.query_dsl import parse_query
+
+    kind, body = bucket
+    filters = list(base)
+    group_by = list(spec.group_by)
+    if kind == "filter":
+        node = parse_query(body, config, spec.data_object, report)
+        pred = emit_filter(node, config, spec.data_object, report) if node else ""
+        if not pred:
+            return None
+        filters.append(pred)
+    elif kind == "terms":
+        fld = str(body.get("field", "")) if isinstance(body, dict) else ""
+        if fld:
+            resolved = config.resolve_field(fld, spec.data_object)
+            if resolved and resolved not in group_by:
+                group_by.append(resolved)
+    # date_histogram: doc_count per interval is just count() over the series interval
+
+    parts = [f"fetch {spec.data_object}"]
+    if filters:
+        parts.append("filter " + " and ".join(filters))
+    mt = f"makeTimeseries {t.subject} = count(), interval: 1m"
+    if group_by:
+        mt += f", by: {{{', '.join(group_by)}}}"
+    parts.append(mt)
+    query = parts[0] + "".join("\n| " + p for p in parts[1:])
+    report.info(f"`{t.subject}.doc_count` is the document count of the `{t.subject}` "
+                f"{kind} aggregation — converted to a per-minute count() series.")
+    return Detector(title=f"{t.subject} {t.comparator} {t.value}", query=query,
+                    alert_condition=_alert_condition(t.comparator), threshold=t.value)
+
+
+def _watcher_detectors(spec: AlertSpec, body: Dict[str, Any], report: Report,
+                       config: Optional[MappingConfig] = None) -> List[Detector]:
     """Turn each watcher threshold into a per-minute anomaly-detector query."""
     out: List[Detector] = []
     base = []  # the search query's own filter, re-expressed for the detector
@@ -273,8 +346,19 @@ def _watcher_detectors(spec: AlertSpec, body: Dict[str, Any], report: Report) ->
         else:
             agg = _find_metric_agg(body.get("aggs", {}), t.subject)
             if not agg:
+                bucket = _find_bucket_agg(body.get("aggs", {}), t.subject)
+                if bucket and config is not None:
+                    det = _bucket_doc_count_detector(t, bucket, base, spec, config, report)
+                    if det:
+                        out.append(det)
+                        continue
+            if not agg and not bucket:
                 report.warn(f"Could not build an anomaly-detector series for `{t.subject}`; "
                             "set the query manually.")
+                continue
+            if not agg:
+                report.warn(f"`{t.subject}` is a bucket aggregation of a kind without a "
+                            "mechanical count() mapping; set the query manually.")
                 continue
             fn, fld = agg
             agg_expr = "count()" if fn == "count" else f"{fn}({fld})"   # count() takes no arg

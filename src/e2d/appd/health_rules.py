@@ -6,12 +6,16 @@ body in `sinks/dynatrace.py`, the push panel, the report and the scorecard.
 
 Three judgement calls decide whether the output is correct or merely plausible:
 
-**Baseline conditions do not become static detectors.** An AppD condition of
-"more than 3 standard deviations above the All Data baseline" has no static
-number in it. Dynatrace's answer to that is built-in Davis anomaly detection,
-which baselines automatically. Inventing a static threshold to fill the gap
-would produce a detector that deploys cleanly and alerts on the wrong thing,
-so these are classified as already-covered and deliberately emit no detector.
+**Baseline conditions become OOTB notes or auto-adaptive detectors.** An AppD
+condition of "more than 3 standard deviations above the All Data baseline" has
+no static number in it. When the metric is one Dynatrace baselines natively
+(service response time, failure rate, host saturation) the rule is classified
+as covered out of the box — recreating it would duplicate coverage and add
+noise. For any other resolvable metric it converts to an **auto-adaptive**
+Davis detector (learned baseline, AppD's σ count mapped to
+`numberOfSignalFluctuations`). What it never does is invent a static threshold,
+which would produce a detector that deploys cleanly and alerts on the wrong
+thing.
 
 **Multi-condition ALL rules do not become several detectors.** Davis detectors
 evaluate independently, so emitting one per condition turns an AND into an OR
@@ -27,7 +31,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-from e2d.alerts.model import Action, AlertSpec, Detector, Threshold
+from e2d.alerts.model import (AUTO_ADAPTIVE_ANALYZER, Action, AlertSpec, Detector, Threshold)
 from e2d.appd import metrics as appd_metrics
 from e2d.dql.validate import lint_into_report
 from e2d.report import Report
@@ -172,19 +176,45 @@ def _convert_condition(cond: dict, severity: str, rule_name: str,
     eval_detail = _get(detail, "metricEvalDetail", default={}) or {}
     eval_type = str(_get(eval_detail, "metricEvalDetailType", default="") or "").upper()
 
-    # -- baseline conditions: Davis already does this ----------------------- #
+    # -- baseline conditions: OOTB for covered metrics, auto-adaptive else --- #
     if eval_type == "BASELINE_TYPE" or _get(eval_detail, "baselineCondition"):
         baseline_name = _get(eval_detail, "baselineName", default="")
         unit = str(_get(eval_detail, "baselineUnit", default="") or "").lower()
         amount = _get(eval_detail, "compareValue", default="")
-        covered = mapping.davis_builtin or (
-            "Davis automatic baselining for " + mapping.dt_metric)
+        if mapping.davis_builtin:
+            report.info(
+                f"Condition `{name}` compares against an AppD baseline "
+                f"({amount} {unit or 'units'} from `{baseline_name or 'baseline'}`). This is "
+                f"covered out of the box by {mapping.davis_builtin} — tune sensitivity there "
+                "rather than recreating the rule.")
+            return None, None, mapping.davis_builtin, metric_scope
+
+        # No built-in Davis coverage, but the metric resolves: convert to an
+        # auto-adaptive detector. Davis learns the baseline from the previous 7
+        # days; AppD's "N standard deviations" maps to `numberOfSignalFluctuations`.
+        raw_comparator = str(_get(eval_detail, "baselineCondition", default="") or "").upper()
+        alert_condition = "BELOW" if "LESS" in raw_comparator or "BELOW" in raw_comparator \
+            else "ABOVE"
+        fluctuations = str(amount).strip() or "3"
+        detector = Detector(
+            title=name if name and name != "condition" else rule_name,
+            query=appd_metrics.build_series_dql(mapping, "value"),
+            alert_condition=alert_condition,
+            threshold="",
+            severity=severity,
+            metric_key=mapping.dt_metric,
+            analyzer=AUTO_ADAPTIVE_ANALYZER,
+            signal_fluctuations=fluctuations,
+        )
         report.info(
-            f"Condition `{name}` compares against an AppD baseline "
-            f"({amount} {unit or 'units'} from `{baseline_name or 'baseline'}`). There is no "
-            f"static threshold to carry across, and none should be invented — this is "
-            f"covered by {covered}. Tune sensitivity there rather than recreating the rule.")
-        return None, None, covered, metric_scope
+            f"Condition `{name}` compared against an AppD baseline ({amount} "
+            f"{unit or 'units'} from `{baseline_name or 'baseline'}`). Converted to an "
+            f"**auto-adaptive** Davis detector on `{mapping.dt_metric}`: the baseline is "
+            f"learned from the previous 7 days and the AppD deviation count became "
+            f"`numberOfSignalFluctuations: {fluctuations}`. The detector fires on 3 "
+            "violating minutes in any 5-minute window. Davis needs ~7 days of metric data "
+            "before this baseline is trustworthy — expect noise in week one.")
+        return detector, None, None, metric_scope
 
     # -- static thresholds: the real conversion ----------------------------- #
     raw_comparator = str(_get(eval_detail, "compareCondition", default="GREATER_THAN") or "").upper()
@@ -367,8 +397,15 @@ def render_health_rule(result: HealthRuleResult) -> str:
         L += [f"## Detectors ({len(spec.detectors)})", ""]
         for d in spec.detectors:
             L += [f"### {d.title} ({d.severity})", "",
-                  "```dql", d.query, "```", "",
-                  f"Alerts **{d.alert_condition}** `{d.threshold}`.", ""]
+                  "```dql", d.query, "```", ""]
+            if d.analyzer == AUTO_ADAPTIVE_ANALYZER:
+                L.append(f"Alerts **{d.alert_condition}** an auto-adaptive baseline "
+                         f"(sensitivity: {d.signal_fluctuations} signal fluctuation(s); "
+                         "3 violating minutes in any 5-minute window). Davis learns the "
+                         "baseline from the previous 7 days.")
+            else:
+                L.append(f"Alerts **{d.alert_condition}** `{d.threshold}`.")
+            L.append("")
 
     notes = result.report.format_deduped()
     if notes:

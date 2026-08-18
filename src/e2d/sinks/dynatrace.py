@@ -18,7 +18,8 @@ from typing import Any, Dict, List, Optional, Tuple
 DOC_PATH = "/platform/document/v1/documents"
 SETTINGS_PATH = "/platform/classic/environment-api/v2/settings/objects"
 ANOMALY_SCHEMA = "builtin:davis.anomaly-detectors"
-_STATIC_ANALYZER = "dt.statistics.ui.anomaly_detection.StaticThresholdAnomalyDetectionAnalyzer"
+from e2d.alerts.model import AUTO_ADAPTIVE_ANALYZER, STATIC_ANALYZER
+_STATIC_ANALYZER = STATIC_ANALYZER  # backward-compatible alias
 
 
 @dataclass
@@ -103,29 +104,45 @@ def _is_numeric(value: str) -> bool:
 def detector_settings_value(alert_name: str, det) -> Dict[str, Any]:
     """Build the `builtin:davis.anomaly-detectors` settings value from a Detector.
 
-    A non-numeric (dynamic) threshold ships disabled with a 0 placeholder so the
-    create still succeeds."""
+    Static analyzer: a non-numeric (dynamic) threshold ships disabled with a 0
+    placeholder so the create still succeeds. Auto-adaptive/seasonal analyzers
+    need no threshold — they carry `numberOfSignalFluctuations` instead and can
+    be enabled immediately (the baseline is learned from the data)."""
+    analyzer = getattr(det, "analyzer", STATIC_ANALYZER) or STATIC_ANALYZER
+    auto = analyzer != STATIC_ANALYZER
     raw = str(det.threshold).strip().strip('"')
     numeric = _is_numeric(raw)
     title = f"{alert_name}: {det.title}"
     sev = "warning" if getattr(det, "severity", "critical") == "warning" else "error"
-    desc = "Migrated from Elastic by e2d" + ("" if numeric else " — DISABLED: set a real threshold")
+    desc = "Migrated from Elastic by e2d"
+    if auto:
+        desc += (" — auto-adaptive baseline (source compared against an AppD baseline); "
+                 "Davis needs ~7 days of metric data before the baseline is trustworthy")
+    elif not numeric:
+        desc += " — DISABLED: set a real threshold"
+    inputs = [
+        {"key": "query", "value": det.query},
+        {"key": "alertCondition", "value": det.alert_condition},
+    ]
+    if auto:
+        inputs.append({"key": "numberOfSignalFluctuations",
+                       "value": str(getattr(det, "signal_fluctuations", "1") or "1")})
+    else:
+        inputs.append({"key": "threshold", "value": raw if numeric else "0"})
+    inputs += [
+        {"key": "violatingSamples", "value": "3"},
+        {"key": "slidingWindow", "value": "5"},
+        {"key": "dealertingSamples", "value": "5"},
+        {"key": "alertOnMissingData", "value": "false"},
+    ]
     return {
-        "enabled": bool(numeric),
+        "enabled": True if auto else bool(numeric),
         "title": title[:500],
         "description": desc,
         "source": "e2d",
         "analyzer": {
-            "name": _STATIC_ANALYZER,
-            "input": [
-                {"key": "query", "value": det.query},
-                {"key": "alertCondition", "value": det.alert_condition},
-                {"key": "threshold", "value": raw if numeric else "0"},
-                {"key": "violatingSamples", "value": "3"},
-                {"key": "slidingWindow", "value": "5"},
-                {"key": "dealertingSamples", "value": "5"},
-                {"key": "alertOnMissingData", "value": "false"},
-            ],
+            "name": analyzer,
+            "input": inputs,
         },
         "eventTemplate": {
             "properties": [

@@ -217,11 +217,14 @@ CATALOGUE: List[Item] = [
          "Converted directly, with AppD units rescaled to Dynatrace units.",
          ("appd_health_rule",)),
     Item("Health rules with baseline conditions",
-         "Built-in Davis anomaly detection",
-         "alerting", NOT_NEEDED, 5,
-         "Davis baselines automatically and seasonally. These rules have no static "
-         "threshold to carry across, and porting them would duplicate coverage and add "
-         "noise. Tune sensitivity in anomaly detection settings instead.",
+         "Built-in Davis anomaly detection, or an auto-adaptive detector",
+         "alerting", AUTOMATIC, 5,
+         "Rules on metrics Dynatrace baselines natively (service response time, failure "
+         "rate, host saturation) are covered out of the box — recreating them would "
+         "duplicate coverage. Rules on other resolvable metrics convert to auto-adaptive "
+         "Davis detectors, with the AppD deviation count mapped to the signal-fluctuation "
+         "sensitivity. Either way Davis needs 7 to 14 days of data before its baselines "
+         "are trustworthy.",
          ("appd_health_rule",)),
     Item("Policies (conditions bound to actions)",
          "Alerting profiles and problem notifications, or Workflows",
@@ -254,9 +257,10 @@ CATALOGUE: List[Item] = [
          ("appd_schedules",)),
     Item("Baselines (dynamic thresholds)", "Davis auto-adaptive and seasonal baselines",
          "alerting", NOT_NEEDED, 5,
-         "Built in. No baseline configuration to migrate — but Davis needs 7 to 14 days of "
-         "data before its baselines are trustworthy, which is why alerting comes after "
-         "instrumentation, not with it."),
+         "Built in. The baseline definitions themselves need no migration — Davis learns "
+         "its own from your data. Health rules referencing a baseline are covered above. "
+         "Davis needs 7 to 14 days of data before its baselines are trustworthy, which is "
+         "why alerting comes after instrumentation, not with it."),
 
     # -- 5. dashboards ------------------------------------------------------ #
     Item("Custom dashboards", "Dynatrace dashboards (DQL)",

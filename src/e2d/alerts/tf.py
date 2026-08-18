@@ -14,9 +14,10 @@ from __future__ import annotations
 import re
 from typing import List
 
-from e2d.alerts.model import AlertSpec, Detector
+from e2d.alerts.model import (AUTO_ADAPTIVE_ANALYZER, SEASONAL_ANALYZER,
+                              STATIC_ANALYZER, AlertSpec, Detector)
 
-_ANALYZER = "dt.statistics.ui.anomaly_detection.StaticThresholdAnomalyDetectionAnalyzer"
+_ANALYZER = STATIC_ANALYZER  # backward-compatible alias
 
 
 def _hcl_str(value: str) -> str:
@@ -41,15 +42,20 @@ def _is_numeric(value: str) -> bool:
 
 def _detector_block(spec: AlertSpec, det: Detector, idx: int) -> str:
     title = f"{spec.name}: {det.title}"
-    # The analyzer's threshold must be numeric. If the source threshold was dynamic
-    # (e.g. a mustache template), emit a 0 placeholder and ship the detector DISABLED
-    # so the module still applies — the user sets a real value and enables it.
+    analyzer = det.analyzer or _ANALYZER
+    auto = analyzer != STATIC_ANALYZER
+    # The static analyzer's threshold must be numeric. If the source threshold was
+    # dynamic (e.g. a mustache template), emit a 0 placeholder and ship the detector
+    # DISABLED so the module still applies — the user sets a real value and enables
+    # it. Auto-adaptive detectors need no threshold and ship enabled.
     raw = str(det.threshold).strip().strip('"')
     numeric = _is_numeric(raw)
     threshold_value = raw if numeric else "0"
-    enabled = "true" if numeric else "false"
+    enabled = "true" if (auto or numeric) else "false"
     description = "Migrated from Elastic " + spec.source_kind
-    if not numeric:
+    if auto:
+        description += " — auto-adaptive baseline; Davis needs ~7 days of data"
+    elif not numeric:
         description += f" — DISABLED: set a real threshold (source was dynamic: {raw})"
     fields = [
         ("alertCondition", det.alert_condition),
@@ -58,8 +64,11 @@ def _detector_block(spec: AlertSpec, det: Detector, idx: int) -> str:
         ("slidingWindow", "5"),
         ("dealertingSamples", "5"),
         ("query", det.query),
-        ("threshold", threshold_value),
     ]
+    if auto:
+        fields.append(("numberOfSignalFluctuations", det.signal_fluctuations or "1"))
+    else:
+        fields.append(("threshold", threshold_value))
     inputs = "\n".join(
         f'      analyzer_input_field {{\n        key   = "{k}"\n        value = {_hcl_str(v)}\n      }}'
         for k, v in fields
@@ -71,7 +80,7 @@ def _detector_block(spec: AlertSpec, det: Detector, idx: int) -> str:
   enabled     = {enabled}
   source      = "Davis Anomaly Detection"
   analyzer {{
-    name = "{_ANALYZER}"
+    name = "{analyzer}"
     input {{
 {inputs}
     }}

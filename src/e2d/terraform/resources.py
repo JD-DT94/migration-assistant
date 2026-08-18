@@ -14,9 +14,10 @@ from __future__ import annotations
 
 from typing import List, Optional
 
+from e2d.alerts.model import AUTO_ADAPTIVE_ANALYZER, SEASONAL_ANALYZER, STATIC_ANALYZER
 from e2d.terraform.module import Resource, hcl_str
 
-_ANALYZER = "dt.statistics.ui.anomaly_detection.StaticThresholdAnomalyDetectionAnalyzer"
+_ANALYZER = STATIC_ANALYZER  # backward-compatible alias
 
 
 def _prefixed(title: str) -> str:
@@ -44,9 +45,14 @@ def detector_resource(spec, det, index: int) -> Resource:
     raw = str(det.threshold).strip().strip('"')
     numeric = _is_numeric(raw)
     threshold = raw if numeric else "0"
+    analyzer = getattr(det, "analyzer", STATIC_ANALYZER) or STATIC_ANALYZER
+    auto = analyzer != STATIC_ANALYZER
 
     description = f"Migrated from {spec.source_kind}"
-    if not numeric:
+    if auto:
+        description += (" — auto-adaptive baseline; Davis learns from the previous 7 days, "
+                        "expect noise in week one")
+    elif not numeric:
         description += (f" — threshold was dynamic in the source ({raw}); set a real value "
                         "before enabling")
 
@@ -57,8 +63,12 @@ def detector_resource(spec, det, index: int) -> Resource:
         ("slidingWindow", "5"),
         ("dealertingSamples", "5"),
         ("query", det.query),
-        ("threshold", threshold),
     ]
+    if auto:
+        fields.append(("numberOfSignalFluctuations",
+                       str(getattr(det, "signal_fluctuations", "1") or "1")))
+    else:
+        fields.append(("threshold", threshold))
     inputs = "\n".join(
         f'      analyzer_input_field {{\n'
         f'        key   = {hcl_str(k)}\n'
@@ -66,9 +76,10 @@ def detector_resource(spec, det, index: int) -> Resource:
         f'      }}'
         for k, v in fields)
 
-    # A non-numeric threshold means the detector cannot be correct yet, so it
-    # stays off regardless of what the caller sets.
-    enabled = "false" if not numeric else "var.detectors_enabled"
+    # A non-numeric static threshold means the detector cannot be correct yet, so
+    # it stays off regardless of what the caller sets. Auto-adaptive detectors are
+    # valid as generated, so they follow the rollout variable.
+    enabled = "var.detectors_enabled" if (auto or numeric) else "false"
     severity = "warning" if det.severity == "warning" else "error"
 
     body = f'''  title       = {_prefixed(title)}
@@ -77,7 +88,7 @@ def detector_resource(spec, det, index: int) -> Resource:
   source      = "Davis Anomaly Detection"
 
   analyzer {{
-    name = {hcl_str(_ANALYZER)}
+    name = {hcl_str(analyzer)}
     input {{
 {inputs}
     }}
@@ -105,7 +116,9 @@ def detector_resource(spec, det, index: int) -> Resource:
   }}'''
 
     comment = ("Threshold was dynamic in the source — this detector is pinned off until a "
-               "real value is set." if not numeric else "")
+               "real value is set." if not numeric and not auto else
+               "Auto-adaptive baseline — Davis needs ~7 days of metric data before the "
+               "baseline is trustworthy." if auto else "")
     return Resource(type="dynatrace_davis_anomaly_detectors",
                     name=f"{spec.name}_{index}" if index else spec.name,
                     body=body, group="detectors", comment=comment)

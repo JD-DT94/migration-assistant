@@ -25,19 +25,30 @@ class Action:
     secret: Optional[str] = None # a credential reference seen (flagged, never copied)
 
 
+STATIC_ANALYZER = "dt.statistics.ui.anomaly_detection.StaticThresholdAnomalyDetectionAnalyzer"
+AUTO_ADAPTIVE_ANALYZER = "dt.statistics.ui.anomaly_detection.AutoAdaptiveAnomalyDetectionAnalyzer"
+SEASONAL_ANALYZER = "dt.statistics.ui.anomaly_detection.SeasonalBaselineAnomalyDetectionAnalyzer"
+
+
 @dataclass
 class Detector:
-    """A single Davis anomaly detector: one DQL series + one static threshold.
+    """A single Davis anomaly detector: one DQL series + a threshold model.
 
     Maps directly to a `dynatrace_davis_anomaly_detectors` resource. The query is
     a `timeseries`/`makeTimeseries` projecting exactly one series at `interval:1m`
-    (what the analyzer requires)."""
+    (what the analyzer requires). ``analyzer`` picks the threshold model: static
+    (default), auto-adaptive (learned baseline, ``signal_fluctuations`` is the
+    sensitivity multiplier), or seasonal."""
     title: str
     query: str
     alert_condition: str          # ABOVE | BELOW
     threshold: str
     severity: str = "critical"    # critical | warning
     metric_key: Optional[str] = None  # set when the series reads a metric (Phase 2 existence check)
+    analyzer: str = STATIC_ANALYZER
+    # auto-adaptive/seasonal only: how many signal fluctuations above the learned
+    # baseline alert (AppD "N standard deviations above baseline" maps here).
+    signal_fluctuations: str = "1"
 
 
 # Recommended Dynatrace landing spot for the alert ("alerting is just a DQL query").
