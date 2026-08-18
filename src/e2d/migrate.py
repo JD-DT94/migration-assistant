@@ -808,25 +808,29 @@ _MAX_HEAL_ROUNDS = 3
 
 def _run_heal_verify_loop(summary: MigrationSummary, out: Path,
                           env_url: Optional[str], token: Optional[str],
-                          verify: bool, verify_data: bool, heal: bool) -> None:
+                          verify: bool, verify_data: bool, heal: bool,
+                          heal_rules: Optional[Tuple[str, ...]] = None,
+                          heal_dry_run: bool = False) -> None:
     """Offline heal + optional verify/re-heal loop (max ``_MAX_HEAL_ROUNDS``)."""
     from e2d.dql.heal import heal_output_dir
 
     if heal:
-        summary.healing_applied.extend(heal_output_dir(out))
+        summary.healing_applied.extend(
+            heal_output_dir(out, rules=heal_rules, dry_run=heal_dry_run))
 
     if not verify:
         return
 
     for _ in range(_MAX_HEAL_ROUNDS):
         _run_post_migration_verify(summary, out, env_url, token, verify_data, apply_items=False)
-        if summary.verify_summary.get("invalid", 0) == 0 or not heal:
+        if summary.verify_summary.get("invalid", 0) == 0 or not heal or heal_dry_run:
             break
         verify_errors = {
             vr.label: vr.errors
             for vr in summary.verify_results if vr.valid is False
         }
-        actions = heal_output_dir(out, labels=list(verify_errors), verify_errors=verify_errors)
+        actions = heal_output_dir(out, labels=list(verify_errors),
+                                  verify_errors=verify_errors, rules=heal_rules)
         if not actions:
             break
         summary.healing_applied.extend(actions)
@@ -936,7 +940,9 @@ def _suggest_config(summary: MigrationSummary, out: Path) -> Optional[str]:
 def run_migration(in_dir: str, out_dir: str, config: Optional[MappingConfig] = None,
                   emit: str = "both", verify: bool = False,
                   env_url: Optional[str] = None, token: Optional[str] = None,
-                  verify_data: bool = False, heal: bool = False) -> MigrationSummary:
+                  verify_data: bool = False, heal: bool = False,
+                  heal_rules: Optional[Tuple[str, ...]] = None,
+                  heal_dry_run: bool = False) -> MigrationSummary:
     """`emit` picks the deployable-artifact flavour for alerts and pipelines:
     "json" (Settings-API upload files), "tf" (Terraform modules) or "both".
 
@@ -948,8 +954,10 @@ def run_migration(in_dir: str, out_dir: str, config: Optional[MappingConfig] = N
     completes.
 
     When ``heal`` is True, known lint/verify failure patterns are auto-fixed
-    on disk before (and between) verify passes. Actions are recorded in
-    ``healing_applied`` on the summary and in ``migration_report.json``."""
+    on disk before (and between) verify passes. ``heal_rules`` limits which
+    fixers run; ``heal_dry_run`` computes fixes without writing files.
+    Actions are recorded in ``healing_applied`` on the summary and in
+    ``migration_report.json``."""
     if emit not in ("json", "tf", "both"):
         emit = "both"
     root = Path(in_dir)
@@ -1068,7 +1076,8 @@ def run_migration(in_dir: str, out_dir: str, config: Optional[MappingConfig] = N
             encoding="utf-8")
 
     if verify or heal:
-        _run_heal_verify_loop(summary, out, env_url, token, verify, verify_data, heal)
+        _run_heal_verify_loop(summary, out, env_url, token, verify, verify_data, heal,
+                              heal_rules=heal_rules, heal_dry_run=heal_dry_run)
 
     (out / "MIGRATION_REPORT.md").write_text(render_report(summary), encoding="utf-8")
     from e2d.score import report_payload

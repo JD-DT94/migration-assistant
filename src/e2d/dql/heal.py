@@ -32,17 +32,45 @@ _FUNC_RENAMES = (
     ("length", "stringLength"),
 )
 
+# All healer codes in a stable order — used for --heal-rules filtering.
+HEAL_RULES = (
+    "array-arithmetic",
+    "by-without-braces",
+    "wrong-function-name",
+    "static-list-brackets",
+    "assignment-in-filter",
+    "percentile-needs-rollup",
+    "block-comment",
+    "verify-error",
+)
 
-def heal_dql(dql: str, verify_errors: Optional[List[str]] = None) -> Tuple[str, List[HealAction]]:
-    """Apply all known auto-fixes to one DQL string. Returns (healed, actions)."""
+
+def heal_dql(dql: str, verify_errors: Optional[List[str]] = None,
+             rules: Optional[Tuple[str, ...]] = None) -> Tuple[str, List[HealAction]]:
+    """Apply known auto-fixes to one DQL string. Returns (healed, actions).
+
+    ``rules`` limits which fixers run (default: all). ``verify_errors`` enables
+    the verify-error fallback fixer.
+    """
+    enabled = set(rules) if rules else set(HEAL_RULES)
     current = dql
     actions: List[HealAction] = []
-    for fixer in (_heal_array_arithmetic, _heal_by_without_braces, _heal_wrong_function_names,
-                  _heal_static_list_brackets, _heal_assignment_in_filter,
-                  _heal_percentile_rollup, _heal_block_comments):
+    fixers = (
+        ("array-arithmetic", _heal_array_arithmetic),
+        ("by-without-braces", _heal_by_without_braces),
+        ("wrong-function-name", _heal_wrong_function_names),
+        ("static-list-brackets", _heal_static_list_brackets),
+        ("assignment-in-filter", _heal_assignment_in_filter),
+        ("percentile-needs-rollup", _heal_percentile_rollup),
+        ("block-comment", _heal_block_comments),
+        ("block-comment", _heal_unterminated_block_comment),
+    )
+    for code, fixer in fixers:
+        if code not in enabled:
+            continue
         current, acts = fixer(current)
         actions.extend(acts)
-    if verify_errors:
+    if verify_errors and "verify-error" in enabled:
         current, acts = _heal_from_verify_errors(current, verify_errors)
         actions.extend(acts)
     return current, actions
@@ -61,15 +89,23 @@ def _heal_array_arithmetic(dql: str) -> Tuple[str, List[HealAction]]:
     for alias in dict.fromkeys(arrays):
         bare = alias.strip("`")
         ref = re.escape(bare)
+        # bare identifier form
         new_tail = tail
-        # alias followed by operator
         before = rf"(?<![\w.`]){ref}(?![\w.`(\[])\s*(?=[-+*/])"
-        # operator followed by alias
         after = rf"([-+*/])\s*(?<![\w.`]){ref}(?![\w.`(\[])"
         if re.search(before, new_tail):
             new_tail = re.sub(before, f"{bare}[]", new_tail)
         if re.search(after, new_tail):
             new_tail = re.sub(after, rf"\1 {bare}[]", new_tail)
+        # backticked form
+        ticked = f"`{bare}`"
+        ref_t = re.escape(ticked)
+        before_t = rf"(?<![\w.`]){ref_t}(?![\w.`(\[])\s*(?=[-+*/])"
+        after_t = rf"([-+*/])\s*(?<![\w.`]){ref_t}(?![\w.`(\[])"
+        if re.search(before_t, new_tail):
+            new_tail = re.sub(before_t, f"{ticked}[]", new_tail)
+        if re.search(after_t, new_tail):
+            new_tail = re.sub(after_t, rf"\1 {ticked}[]", new_tail)
         if new_tail != tail:
             actions.append(HealAction(
                 "array-arithmetic", "",
@@ -168,16 +204,47 @@ def _heal_block_comments(dql: str) -> Tuple[str, List[HealAction]]:
     return dql, []
 
 
+def _heal_unterminated_block_comment(dql: str) -> Tuple[str, List[HealAction]]:
+    """A `/*` without closing `*/` breaks parsing — truncate it to a line comment."""
+    idx = dql.find("/*")
+    if idx < 0 or "*/" in dql[idx:]:
+        return dql, []
+    inner = dql[idx + 2:].replace("\n", " ").strip()
+    new = dql[:idx] + (f"// {inner}" if inner else "//")
+    return new, [HealAction(
+        "block-comment", "",
+        "Unterminated `/*` comment truncated to `//` (DQL has no block comments).")]
+
+
 def _heal_from_verify_errors(dql: str, errors: List[str]) -> Tuple[str, List[HealAction]]:
-    """Re-run name fixers when verify errors mention unknown functions."""
+    """Map verify error patterns to deterministic fixes."""
     actions: List[HealAction] = []
     current = dql
     joined = " ".join(errors).lower()
+
+    # unknown function -> rename
     for wrong, right in _FUNC_RENAMES:
         if wrong.lower() in joined and re.search(rf"\b{wrong}\s*\(", current):
             current = re.sub(rf"\b{wrong}\b", right, current)
             actions.append(HealAction(
                 "verify-error", "", f"Verify error mentioned `{wrong}` — renamed to `{right}()`."))
+
+    # "unknown field" / "no such field" on a dt.entity.* reference
+    if re.search(r"unknown field|no such field|cannot resolve", joined):
+        m = re.search(r"dt\.entity\.([\w.]+)", current)
+        if m:
+            field = m.group(1)
+            # best-effort: strip dt.entity. prefix (real field is usually the same name)
+            current = re.sub(rf"dt\.entity\.{re.escape(field)}", field, current)
+            actions.append(HealAction(
+                "verify-error", "",
+                f"Verify flagged unknown field `dt.entity.{field}` — stripped deprecated prefix."))
+
+    # parse error near "by:" without braces
+    if "by:" in joined and re.search(r"\bby:\s*(?!\{)" + _IDENT, current):
+        current, acts = _heal_by_without_braces(current)
+        actions.extend(acts)
+
     return current, actions
 
 
@@ -246,8 +313,13 @@ def patch_artifact_dql(out_dir: Path, label: str, new_dql: str) -> None:
 
 def heal_output_dir(out_dir: Path,
                     labels: Optional[List[str]] = None,
-                    verify_errors: Optional[Dict[str, List[str]]] = None) -> List[HealAction]:
-    """Heal DQL artifacts under *out_dir* and write fixes back to disk."""
+                    verify_errors: Optional[Dict[str, List[str]]] = None,
+                    rules: Optional[Tuple[str, ...]] = None,
+                    dry_run: bool = False) -> List[HealAction]:
+    """Heal DQL artifacts under *out_dir*.
+
+    When ``dry_run`` is True, compute fixes but do not write files.
+    """
     from e2d.api.client import _iter_dql_artifacts
 
     label_filter = set(labels) if labels else None
@@ -256,10 +328,11 @@ def heal_output_dir(out_dir: Path,
         if label_filter is not None and label not in label_filter:
             continue
         errs = (verify_errors or {}).get(label)
-        healed, actions = heal_dql(dql, verify_errors=errs)
+        healed, actions = heal_dql(dql, verify_errors=errs, rules=rules)
         if healed == dql:
             continue
-        patch_artifact_dql(out_dir, label, healed)
+        if not dry_run:
+            patch_artifact_dql(out_dir, label, healed)
         for act in actions:
             act.label = label
             all_actions.append(act)

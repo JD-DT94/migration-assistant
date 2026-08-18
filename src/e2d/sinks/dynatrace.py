@@ -138,6 +138,39 @@ def detector_settings_value(alert_name: str, det) -> Dict[str, Any]:
     }
 
 
+def validate_settings_object(env_url: str, token: Optional[str], schema_id: str,
+                             value: Dict[str, Any], timeout: int = 30) -> Tuple[bool, str]:
+    """Pre-validate a Settings object against the tenant schema.
+
+    Uses ``POST /api/v2/settings/objects?validateOnly=true`` when available.
+    Returns (ok, detail). Never raises; missing creds or network yield
+    (False, reason).
+    """
+    if not env_url or not token:
+        return False, "missing env URL or token"
+    try:
+        import requests
+    except ImportError:
+        return False, "requests not installed (pip install ...[push])"
+    body = [{"schemaId": schema_id, "scope": "environment", "value": value}]
+    try:
+        resp = requests.post(
+            env_url.rstrip("/") + SETTINGS_PATH + "?validateOnly=true",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json=body, timeout=timeout)
+    except Exception as e:
+        return False, f"request failed: {e}"
+    if resp.status_code in (200, 201, 204):
+        return True, "valid"
+    try:
+        arr = resp.json()
+        first = arr[0] if isinstance(arr, list) and arr else {}
+        detail = first.get("error", {}).get("message") if isinstance(first.get("error"), dict) else None
+        return False, detail or f"HTTP {resp.status_code}: {resp.text[:200]}"
+    except ValueError:
+        return False, f"HTTP {resp.status_code}: {resp.text[:200]}"
+
+
 def push_settings_object(env_url: str, token: Optional[str], schema_id: str, value: Dict[str, Any],
                          label: str, apply: bool = False, timeout: int = 60) -> DeployResult:
     if not apply:

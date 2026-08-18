@@ -15,6 +15,7 @@ Results land in `migration_report.json` under `verify_results` and
 """
 
 from e2d.dql.validate import Finding, lint_dql, lint_into_report
-from e2d.dql.heal import HealAction, heal_dql, heal_output_dir
+from e2d.dql.heal import HEAL_RULES, HealAction, heal_dql, heal_output_dir
 
-__all__ = ["Finding", "lint_dql", "lint_into_report", "HealAction", "heal_dql", "heal_output_dir"]
+__all__ = ["Finding", "lint_dql", "lint_into_report", "HEAL_RULES",
+           "HealAction", "heal_dql", "heal_output_dir"]

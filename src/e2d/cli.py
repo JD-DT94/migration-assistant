@@ -218,6 +218,18 @@ def cmd_pipeline(args: argparse.Namespace) -> int:
     return 1 if (args.strict and res.report.has_blocking) else 0
 
 
+def _parse_heal_rules(raw: Optional[str]) -> Optional[Tuple[str, ...]]:
+    if not raw:
+        return None
+    from e2d.dql.heal import HEAL_RULES
+    wanted = {r.strip() for r in raw.split(",") if r.strip()}
+    unknown = wanted - set(HEAL_RULES)
+    if unknown:
+        print(f"warning: unknown heal rule(s) ignored: {', '.join(sorted(unknown))}",
+              file=sys.stderr)
+    return tuple(r for r in HEAL_RULES if r in wanted) or None
+
+
 def cmd_migrate(args: argparse.Namespace) -> int:
     from e2d.migrate import run_migration
     config = _load_config(args.config)
@@ -236,6 +248,8 @@ def cmd_migrate(args: argparse.Namespace) -> int:
         env_url=env_url, token=token,
         verify_data=getattr(args, "data", False),
         heal=getattr(args, "heal", False),
+        heal_rules=_parse_heal_rules(getattr(args, "heal_rules", None)),
+        heal_dry_run=getattr(args, "heal_dry_run", False),
     )
     c = summary.counts()
     print(f"\nMigrated {len(summary.items)} item(s): "
@@ -339,6 +353,8 @@ def cmd_assess(args: argparse.Namespace) -> int:
             env_url=env_url, token=token,
             verify_data=getattr(args, "data", False),
             heal=getattr(args, "heal", False),
+            heal_rules=_parse_heal_rules(getattr(args, "heal_rules", None)),
+            heal_dry_run=getattr(args, "heal_dry_run", False),
         )
         payload = report_payload(summary)
     sc = payload["scorecard"]
@@ -455,6 +471,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help="After conversion, validate all DQL against the tenant (query:verify)")
     m.add_argument("--heal", action="store_true",
                    help="Auto-fix known DQL lint/verify patterns on converted artifacts")
+    m.add_argument("--heal-rules",
+                   help="Comma-separated heal rules to run (default: all). "
+                        "Choices: array-arithmetic, by-without-braces, wrong-function-name, "
+                        "static-list-brackets, assignment-in-filter, percentile-needs-rollup, "
+                        "block-comment, verify-error")
+    m.add_argument("--heal-dry-run", action="store_true",
+                   help="Compute heal fixes but do not write files")
     m.add_argument("--env-url", help="Dynatrace env URL for --verify (or DYNATRACE_ENV_URL)")
     m.add_argument("--token-env", default="DT_API_TOKEN",
                    help="Env var holding the platform token for --verify (default: DT_API_TOKEN)")
@@ -506,6 +529,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Validate converted DQL against the tenant after conversion")
     ax.add_argument("--heal", action="store_true",
                     help="Auto-fix known DQL patterns before/after verify")
+    ax.add_argument("--heal-rules",
+                    help="Comma-separated heal rules to run (default: all)")
+    ax.add_argument("--heal-dry-run", action="store_true",
+                    help="Compute heal fixes but do not write files")
     ax.add_argument("--env-url", help="Dynatrace env URL for --verify (or DYNATRACE_ENV_URL)")
     ax.add_argument("--token-env", default="DT_API_TOKEN",
                     help="Env var holding the platform token for --verify")

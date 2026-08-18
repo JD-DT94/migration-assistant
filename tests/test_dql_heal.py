@@ -2,7 +2,7 @@
 
 import json
 
-from e2d.dql.heal import heal_dql, heal_output_dir, patch_artifact_dql
+from e2d.dql.heal import heal_dql, heal_output_dir, patch_artifact_dql, HEAL_RULES
 from e2d.dql.validate import lint_dql
 
 
@@ -21,6 +21,14 @@ def test_heal_array_arithmetic():
     assert "errors[]" in healed and "total[]" in healed
     assert any(a.code == "array-arithmetic" for a in acts)
     assert not any(f.code == "array-arithmetic" for f in lint_dql(healed))
+
+
+def test_heal_array_arithmetic_backticked():
+    dql = ('fetch logs\n| makeTimeseries {`my alias` = count()}, interval: 30m\n'
+           '| fieldsAdd x = `my alias` / 2')
+    healed, acts = heal_dql(dql)
+    assert "`my alias`[]" in healed
+    assert any(a.code == "array-arithmetic" for a in acts)
 
 
 def test_heal_wrong_function_names():
@@ -54,6 +62,26 @@ def test_heal_output_dir_writes_dql(tmp_path):
     assert "by: {service.name}" in fixed
 
 
+def test_heal_output_dir_dry_run(tmp_path):
+    (tmp_path / "queries").mkdir()
+    bad = "fetch logs | summarize count(), by: service.name\n"
+    (tmp_path / "queries" / "q.dql").write_text(bad, encoding="utf-8")
+    acts = heal_output_dir(tmp_path, dry_run=True)
+    assert acts
+    unchanged = (tmp_path / "queries" / "q.dql").read_text(encoding="utf-8")
+    assert unchanged == bad
+
+
+def test_heal_output_dir_rule_filter(tmp_path):
+    (tmp_path / "queries").mkdir()
+    bad = "fetch logs | summarize count(), by: service.name\n"
+    (tmp_path / "queries" / "q.dql").write_text(bad, encoding="utf-8")
+    acts = heal_output_dir(tmp_path, rules=("array-arithmetic",))
+    assert acts == []
+    unchanged = (tmp_path / "queries" / "q.dql").read_text(encoding="utf-8")
+    assert unchanged == bad
+
+
 def test_heal_block_comments_preserve_content():
     dql = "fetch logs | fieldsAdd x = /* important note */ 0"
     healed, acts = heal_dql(dql)
@@ -65,6 +93,13 @@ def test_heal_block_comment_multiline():
     dql = "fetch logs\n| fieldsAdd x = /* line1\nline2 */ 0"
     healed, acts = heal_dql(dql)
     assert "// line1 line2" in healed
+
+
+def test_heal_unterminated_block_comment():
+    dql = "fetch logs | fieldsAdd x = /* TODO 0"
+    healed, acts = heal_dql(dql)
+    assert "// TODO 0" in healed
+    assert "/*" not in healed
 
 
 def test_heal_by_multiple_fields():
@@ -92,8 +127,15 @@ def test_heal_verify_error_function_rename():
     dql = "fetch logs | fieldsAdd x = toLowercase(content)"
     healed, acts = heal_dql(dql, verify_errors=["Unknown function: toLowercase"])
     assert "lower(" in healed
-    # lint-based fixer catches it first; verify-error is a fallback
     assert any(a.code in ("wrong-function-name", "verify-error") for a in acts)
+
+
+def test_heal_verify_error_entity_field():
+    dql = "fetch logs | summarize count(), by: {dt.entity.service.name}"
+    healed, acts = heal_dql(dql, verify_errors=["Unknown field: dt.entity.service.name"])
+    assert "dt.entity.service.name" not in healed
+    assert "service.name" in healed
+    assert any(a.code == "verify-error" for a in acts)
 
 
 def test_heal_idempotent():
@@ -102,6 +144,11 @@ def test_heal_idempotent():
     twice, acts2 = heal_dql(once)
     assert once == twice
     assert acts2 == []
+
+
+def test_heal_rules_constant():
+    assert "array-arithmetic" in HEAL_RULES
+    assert "verify-error" in HEAL_RULES
 
 
 def test_patch_dashboard_tile(tmp_path):

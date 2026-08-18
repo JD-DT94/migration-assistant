@@ -65,14 +65,14 @@ e2d assess samples/ --heal --verify --json report.json
 
 | Code | Fix |
 |------|-----|
-| `array-arithmetic` | Insert `[]` on timeseries aliases in arithmetic |
+| `array-arithmetic` | Insert `[]` on timeseries aliases (bare and backticked) |
 | `by-without-braces` | Wrap `by: field[, field2]` → `by: {field[, field2]}` |
 | `wrong-function-name` | `toLowercase`→`lower`, `toUppercase`→`upper`, `length`→`stringLength` |
 | `static-list-brackets` | `in(f, ["a"])` → `in(f, {"a"})` |
 | `assignment-in-filter` | Single `=` → `==` in filter stages |
 | `percentile-needs-rollup` | Insert `rollup: avg` before `interval:` (or at end if no interval) |
-| `block-comment` | `/* … */` → `// …` (content preserved) |
-| `verify-error` | Re-apply function renames when verify mentions unknown functions |
+| `block-comment` | `/* … */` → `// …` (content preserved); unterminated `/*` truncated |
+| `verify-error` | Function renames, `dt.entity.*` prefix strip, `by:` braces from verify errors |
 
 Healing **writes back** to converted artifacts:
 
@@ -89,7 +89,7 @@ Dashboard `$Variable` references are substituted with `""` before verify.
 
 ## API surface
 
-### `run_migration(..., heal=False, verify=False, env_url=None, token=None, verify_data=False)`
+### `run_migration(..., heal=False, verify=False, env_url=None, token=None, verify_data=False, heal_rules=None, heal_dry_run=False)`
 
 Returns `MigrationSummary` with:
 
@@ -99,13 +99,13 @@ Returns `MigrationSummary` with:
 | `verify_results` | List of `VerifySweepResult` |
 | `verify_summary` | Counts: total, ok, invalid, skipped, empty |
 
-### `heal_dql(dql, verify_errors=None) -> (str, List[HealAction])`
+### `heal_dql(dql, verify_errors=None, rules=None) -> (str, List[HealAction])`
 
-Pure function — heal one query string.
+Pure function — heal one query string. `rules` limits which fixers run.
 
-### `heal_output_dir(out_dir, labels=None, verify_errors=None) -> List[HealAction]`
+### `heal_output_dir(out_dir, labels=None, verify_errors=None, rules=None, dry_run=False) -> List[HealAction]`
 
-Scan output directory, heal, write back.
+Scan output directory, heal, write back. `dry_run=True` computes without writing.
 
 ### `run_verify_sweep(out_dir, env_url, token, check_data=False)`
 
@@ -131,16 +131,23 @@ The browser WASM build cannot call Dynatrace APIs. The local web server exposes:
 
 | Endpoint | Purpose |
 |----------|---------|
-| `POST /migrate` | Body may include `heal`, `verify`, `env_url`, `token`, `data` |
+| `POST /migrate` | Body may include `heal`, `verify`, `env_url`, `token`, `data`, `heal_rules`, `heal_dry_run` |
 | `POST /verify` | Verify converted output for a session (`env_url`, `token`, `data`) |
 
-Example:
+The page has **Auto-heal DQL**, **Verify against tenant**, and **Check for empty results** checkboxes plus a **Verify now** button in the Deploy panel.
 
-```json
-POST /verify
-X-Session: <session-id>
-{"env_url": "https://….apps.dynatrace.com", "token": "…", "data": false}
+## Per-project connection settings
+
+`e2d/settings.py` persists connection details to `.e2d/project.json` (mode 0600) under the current working directory or `E2D_PROJECT_DIR`.
+
+```python
+from e2d.settings import load_project_settings, update_project_settings
+
+s = load_project_settings()
+update_project_settings(dynatrace_env_url="https://env", default_heal=True)
 ```
+
+Fields: `dynatrace_env_url`, `dynatrace_token`, `elastic_kibana_url`, `elastic_es_url`, `elastic_token`, `elastic_auth_scheme`, `verify_tls`, `default_heal`, `default_verify`, `default_heal_rules`.
 
 ## CI
 
@@ -182,15 +189,12 @@ Live verify requires `[push]` (`requests`). Healing is stdlib-only.
 
 ## Known limitations
 
-- **Backticked timeseries aliases** (`` `my alias` ``) are flagged by lint but not auto-healed — the fixer uses bare identifiers.
-- **Unterminated block comments** (`/* …`) are not healed (no closing `*/` to match).
-- **Verify-error healing** only covers function-name renames today; other verify errors require manual fixes.
+- **Verify-error healing** covers function renames, `dt.entity.*` prefix stripping, and `by:` braces; other verify errors require manual fixes.
+- **Settings schema pre-validation** uses `?validateOnly=true` where the tenant supports it; unsupported tenants return an error.
 
 ## Not yet implemented
 
-1. **Settings schema pre-validation** — dry-run before detector/pipeline push
-2. **Browser UI button for /verify** — endpoint exists; page JS not wired yet
-3. **Broader verify-error heal registry** — only function-name patterns today
+1. **Browser UI wiring for heal rule selection** — CLI supports `--heal-rules`; page does not expose it yet
 
 ## Testing
 

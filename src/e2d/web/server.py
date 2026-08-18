@@ -152,13 +152,21 @@ class Sessions:
 
     def migrate(self, sid: str, emit: str = "both", heal: bool = False,
                 verify: bool = False, env_url: str = "", token: str = "",
-                verify_data: bool = False) -> dict:
+                verify_data: bool = False,
+                heal_rules: Optional[str] = None,
+                heal_dry_run: bool = False) -> dict:
         dirs = self._dirs(sid)
+        rules = None
+        if heal_rules:
+            from e2d.dql.heal import HEAL_RULES
+            wanted = {r.strip() for r in heal_rules.split(",") if r.strip()}
+            rules = tuple(r for r in HEAL_RULES if r in wanted) or None
         summary = run_migration(
             str(dirs["in"]), str(dirs["out"]), self.config, emit=emit,
             heal=heal, verify=verify,
             env_url=env_url or None, token=token or None,
             verify_data=verify_data,
+            heal_rules=rules, heal_dry_run=heal_dry_run,
         )
         # bundle the outputs for download
         archive = dirs["out"].parent / "converted.zip"
@@ -443,6 +451,8 @@ def make_handler(sessions: Sessions):
                         env_url=body.get("env_url", ""),
                         token=body.get("token", ""),
                         verify_data=bool(body.get("data")),
+                        heal_rules=body.get("heal_rules"),
+                        heal_dry_run=bool(body.get("heal_dry_run")),
                     ))
                 elif self.path == "/verify":
                     sid = self.headers.get("X-Session", "")
@@ -1341,7 +1351,14 @@ showView(window.localStorage.getItem("e2d_view") || "home");
 
 // alerts/pipelines export format (JSON vs Terraform) — remembered per browser
 const emitSel = $("#emitsel");
-const emitBody = () => JSON.stringify({ emit: emitSel.value });
+const emitBody = () => JSON.stringify({
+  emit: emitSel.value,
+  heal: $("#healchk") ? $("#healchk").checked : false,
+  verify: $("#verifychk") ? $("#verifychk").checked : false,
+  env_url: deployEnv,
+  token: deployToken,
+  data: $("#datachk") ? $("#datachk").checked : false,
+});
 
 drop.addEventListener("click", () => picker.click());
 picker.addEventListener("change", e => addFiles(e.target.files));
@@ -1580,6 +1597,8 @@ function deployPanel(d) {
   const nDash = d.items.filter(it => it.category === "dashboard" && it.status !== "ERROR").length;
   const nAlert = d.items.filter(it => it.category === "alert").length;
   const nPipe = d.items.filter(it => it.category === "pipeline").length;
+  const vs = d.verify_summary || {};
+  const healCount = (d.healing_applied || []).length;
   return `<details class="card" style="margin-top:18px" id="deploy-card">
     <summary class="h">Deploy to Dynatrace</summary>
     <p class="note">Pushes <b>${nDash} dashboard(s)</b> (Document API) and the anomaly detectors from
@@ -1597,8 +1616,37 @@ function deployPanel(d) {
       <button id="dryrun">Dry run</button>
       <button id="deploybtn" style="background:var(--ok);border-color:var(--ok);color:#0b1f10">Deploy</button>
     </div>
+    <div class="conn" style="margin-top:10px">
+      <label><input type="checkbox" id="healchk"> Auto-heal DQL</label>
+      <label><input type="checkbox" id="verifychk"> Verify against tenant</label>
+      <label><input type="checkbox" id="datachk"> Check for empty results</label>
+      <button id="verifybtn">Verify now</button>
+    </div>
+    ${vs.total ? `<p class="note">Last verify: ${vs.ok} ok, ${vs.invalid} invalid, ${vs.skipped} skipped${vs.empty ? `, ${vs.empty} empty` : ""}.</p>` : ""}
+    ${healCount ? `<p class="note">${healCount} auto-fix(es) applied during conversion.</p>` : ""}
     <div id="deploy-out"></div>
   </details>`;
+}
+
+async function runVerify() {
+  const out = $("#deploy-out");
+  out.innerHTML = `<p class="note">Verifying…</p>`;
+  try {
+    deployEnv = $("#dt_env").value.trim(); deployToken = $("#dt_token").value;
+    saveDeployCreds();
+    const res = await post("/verify", JSON.stringify({
+      env_url: deployEnv, token: deployToken,
+      data: $("#datachk") ? $("#datachk").checked : false,
+    }), { "X-Session": currentSession, "Content-Type": "application/json" });
+    const vs = res.verify_summary || {};
+    let h = `<p class="note">Verified ${vs.total} quer(ies): ${vs.ok} ok, ${vs.invalid} invalid, ${vs.skipped} skipped${vs.empty ? `, ${vs.empty} empty` : ""}.</p>`;
+    const bad = (res.verify_results || []).filter(r => r.valid === false);
+    if (bad.length) {
+      h += `<ul class="notes">` + bad.map(r =>
+        `<li class="note"><code>${esc(r.label)}</code>: ${esc((r.errors || []).join("; ") || "invalid")}</li>`).join("") + `</ul>`;
+    }
+    out.innerHTML = h;
+  } catch (e) { out.innerHTML = `<p class="err-box">${esc(e.message)}</p>`; }
 }
 
 async function runDeploy(apply) {
@@ -1626,6 +1674,7 @@ async function runDeploy(apply) {
 result.addEventListener("click", e => {
   if (e.target.id === "dryrun") runDeploy(false);
   if (e.target.id === "deploybtn") runDeploy(true);
+  if (e.target.id === "verifybtn") runVerify();
 });
 // remember deploy creds as they're typed, so they survive a new conversion
 result.addEventListener("input", e => {
