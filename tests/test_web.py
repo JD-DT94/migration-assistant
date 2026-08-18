@@ -70,6 +70,19 @@ def test_zip_upload_is_extracted():
         s.close()
 
 
+def test_web_verify_endpoint():
+    s = Sessions()
+    try:
+        sid = s.new()
+        s.add_file(sid, "q.esql", ESQL)
+        s.migrate(sid)
+        res = s.verify(sid, {"env_url": "", "token": ""})
+        assert "verify_summary" in res
+        assert res["verify_summary"]["skipped"] >= 1
+    finally:
+        s.close()
+
+
 def test_zip_slip_is_blocked(tmp_path):
     s = Sessions()
     try:

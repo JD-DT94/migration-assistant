@@ -150,9 +150,16 @@ class Sessions:
 
     # -- migration ---------------------------------------------------------- #
 
-    def migrate(self, sid: str, emit: str = "both") -> dict:
+    def migrate(self, sid: str, emit: str = "both", heal: bool = False,
+                verify: bool = False, env_url: str = "", token: str = "",
+                verify_data: bool = False) -> dict:
         dirs = self._dirs(sid)
-        summary = run_migration(str(dirs["in"]), str(dirs["out"]), self.config, emit=emit)
+        summary = run_migration(
+            str(dirs["in"]), str(dirs["out"]), self.config, emit=emit,
+            heal=heal, verify=verify,
+            env_url=env_url or None, token=token or None,
+            verify_data=verify_data,
+        )
         # bundle the outputs for download
         archive = dirs["out"].parent / "converted.zip"
         with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -187,7 +194,27 @@ class Sessions:
             "scorecard": sc,
             "scorecard_line": scorecard_line(sc),
             "unmatched": summary.unmatched_indexes,
+            "verify_summary": summary.verify_summary,
+            "healing_applied": [
+                a.to_dict() if hasattr(a, "to_dict") else a
+                for a in summary.healing_applied
+            ],
             "download": f"/download/{sid}",
+        }
+
+    def verify(self, sid: str, cfg: dict) -> dict:
+        """Live DQL verify against a Dynatrace tenant (server-side; WASM cannot)."""
+        dirs = self._dirs(sid)
+        from e2d.api.client import run_verify_sweep
+        results, counts = run_verify_sweep(
+            str(dirs["out"]),
+            cfg.get("env_url", ""),
+            cfg.get("token", ""),
+            bool(cfg.get("data")),
+        )
+        return {
+            "verify_summary": counts,
+            "verify_results": [r.to_dict() for r in results],
         }
 
     def download(self, sid: str) -> bytes:
@@ -409,7 +436,18 @@ def make_handler(sessions: Sessions):
                 elif self.path == "/migrate":
                     sid = self.headers.get("X-Session", "")
                     body = json.loads(self._read_body() or b"{}")
-                    self._json(200, sessions.migrate(sid, body.get("emit", "both")))
+                    self._json(200, sessions.migrate(
+                        sid, body.get("emit", "both"),
+                        heal=bool(body.get("heal")),
+                        verify=bool(body.get("verify")),
+                        env_url=body.get("env_url", ""),
+                        token=body.get("token", ""),
+                        verify_data=bool(body.get("data")),
+                    ))
+                elif self.path == "/verify":
+                    sid = self.headers.get("X-Session", "")
+                    self._json(200, sessions.verify(
+                        sid, json.loads(self._read_body() or b"{}")))
                 elif self.path == "/connect":
                     sid = self.headers.get("X-Session", "")
                     sessions.connect(sid, json.loads(self._read_body() or b"{}"))

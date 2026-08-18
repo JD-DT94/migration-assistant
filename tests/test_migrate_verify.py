@@ -92,6 +92,17 @@ def test_migrate_verify_updates_report(mock_sweep, tmp_path):
     assert payload["verify_results"][0]["valid"] is False
 
 
+def test_migrate_heal_only(tmp_path):
+    indir = tmp_path / "in"
+    outdir = tmp_path / "out"
+    indir.mkdir()
+    (indir / "simple_query.json").write_text(
+        json.dumps({"query": {"match_all": {}}}), encoding="utf-8")
+    summary = run_migration(str(indir), str(outdir), heal=True)
+    payload = json.loads((outdir / "migration_report.json").read_text())
+    assert "healing_applied" in payload
+
+
 def test_apply_verify_to_items_bumps_status():
     from e2d.migrate import MigrationSummary, Item, _apply_verify_to_items
 

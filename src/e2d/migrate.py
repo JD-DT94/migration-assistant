@@ -95,6 +95,7 @@ class MigrationSummary:
     # Live DQL verification (optional — when migrate runs with --verify)
     verify_results: List[Any] = field(default_factory=list)
     verify_summary: Dict[str, int] = field(default_factory=dict)
+    healing_applied: List[Any] = field(default_factory=list)
     # One Terraform child module accumulated across the whole run, so the output
     # is a single importable module rather than a root module per artifact.
     tf_module: Any = None
@@ -793,13 +794,44 @@ def _apply_verify_to_items(summary: MigrationSummary) -> None:
 
 def _run_post_migration_verify(summary: MigrationSummary, out: Path,
                                env_url: Optional[str], token: Optional[str],
-                               verify_data: bool) -> None:
+                               verify_data: bool, apply_items: bool = True) -> None:
     from e2d.api.client import run_verify_sweep
     results, counts = run_verify_sweep(str(out), env_url, token, verify_data)
     summary.verify_results = results
     summary.verify_summary = counts
-    if results:
+    if apply_items and results:
         _apply_verify_to_items(summary)
+
+
+_MAX_HEAL_ROUNDS = 3
+
+
+def _run_heal_verify_loop(summary: MigrationSummary, out: Path,
+                          env_url: Optional[str], token: Optional[str],
+                          verify: bool, verify_data: bool, heal: bool) -> None:
+    """Offline heal + optional verify/re-heal loop (max ``_MAX_HEAL_ROUNDS``)."""
+    from e2d.dql.heal import heal_output_dir
+
+    if heal:
+        summary.healing_applied.extend(heal_output_dir(out))
+
+    if not verify:
+        return
+
+    for _ in range(_MAX_HEAL_ROUNDS):
+        _run_post_migration_verify(summary, out, env_url, token, verify_data, apply_items=False)
+        if summary.verify_summary.get("invalid", 0) == 0 or not heal:
+            break
+        verify_errors = {
+            vr.label: vr.errors
+            for vr in summary.verify_results if vr.valid is False
+        }
+        actions = heal_output_dir(out, labels=list(verify_errors), verify_errors=verify_errors)
+        if not actions:
+            break
+        summary.healing_applied.extend(actions)
+
+    _apply_verify_to_items(summary)
 
 
 # --------------------------------------------------------------------------- #
@@ -904,7 +936,7 @@ def _suggest_config(summary: MigrationSummary, out: Path) -> Optional[str]:
 def run_migration(in_dir: str, out_dir: str, config: Optional[MappingConfig] = None,
                   emit: str = "both", verify: bool = False,
                   env_url: Optional[str] = None, token: Optional[str] = None,
-                  verify_data: bool = False) -> MigrationSummary:
+                  verify_data: bool = False, heal: bool = False) -> MigrationSummary:
     """`emit` picks the deployable-artifact flavour for alerts and pipelines:
     "json" (Settings-API upload files), "tf" (Terraform modules) or "both".
 
@@ -913,7 +945,11 @@ def run_migration(in_dir: str, out_dir: str, config: Optional[MappingConfig] = N
     and ``token``). Results are stored on the summary, reflected in item
     status/notes, and included in ``migration_report.json``. Missing creds or
     the ``requests`` package produce skipped results — the migration still
-    completes."""
+    completes.
+
+    When ``heal`` is True, known lint/verify failure patterns are auto-fixed
+    on disk before (and between) verify passes. Actions are recorded in
+    ``healing_applied`` on the summary and in ``migration_report.json``."""
     if emit not in ("json", "tf", "both"):
         emit = "both"
     root = Path(in_dir)
@@ -1031,8 +1067,8 @@ def run_migration(in_dir: str, out_dir: str, config: Optional[MappingConfig] = N
             render_coverage(summary.appd_kinds, converted=summary.appd_rule_classes),
             encoding="utf-8")
 
-    if verify:
-        _run_post_migration_verify(summary, out, env_url, token, verify_data)
+    if verify or heal:
+        _run_heal_verify_loop(summary, out, env_url, token, verify, verify_data, heal)
 
     (out / "MIGRATION_REPORT.md").write_text(render_report(summary), encoding="utf-8")
     from e2d.score import report_payload
@@ -1135,6 +1171,18 @@ def render_report(summary: MigrationSummary) -> str:
         if skipped and not bad:
             L.append(f"{len(skipped)} quer(ies) could not be verified (missing creds or network).")
             L.append("")
+
+    if summary.healing_applied:
+        L.append("## Auto-healing applied")
+        L.append("")
+        L.append(f"**{len(summary.healing_applied)}** deterministic fix(es) were applied:")
+        L.append("")
+        for act in summary.healing_applied:
+            label = getattr(act, "label", "") or act.get("label", "")
+            msg = getattr(act, "message", "") or act.get("message", "")
+            code = getattr(act, "code", "") or act.get("code", "")
+            L.append(f"- `[{code}]` `{label}`: {msg}")
+        L.append("")
 
     if summary.ilm_policies or summary.template_patterns:
         L.append("## Cutover")

@@ -235,6 +235,7 @@ def cmd_migrate(args: argparse.Namespace) -> int:
         verify=getattr(args, "verify", False),
         env_url=env_url, token=token,
         verify_data=getattr(args, "data", False),
+        heal=getattr(args, "heal", False),
     )
     c = summary.counts()
     print(f"\nMigrated {len(summary.items)} item(s): "
@@ -245,6 +246,9 @@ def cmd_migrate(args: argparse.Namespace) -> int:
         print(f"Verify: {vs.get('ok', 0)} ok, {vs.get('invalid', 0)} invalid, "
               f"{vs.get('skipped', 0)} skipped"
               + (f", {vs.get('empty', 0)} valid-but-empty" if vs.get("empty") else ""),
+              file=sys.stderr)
+    if summary.healing_applied:
+        print(f"Healed: {len(summary.healing_applied)} auto-fix(es) applied — see report",
               file=sys.stderr)
     print(f"Report -> {Path(args.output) / 'MIGRATION_REPORT.md'}", file=sys.stderr)
     if summary.secrets:
@@ -334,6 +338,7 @@ def cmd_assess(args: argparse.Namespace) -> int:
             verify=getattr(args, "verify", False),
             env_url=env_url, token=token,
             verify_data=getattr(args, "data", False),
+            heal=getattr(args, "heal", False),
         )
         payload = report_payload(summary)
     sc = payload["scorecard"]
@@ -448,6 +453,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Exit non-zero if any item is MANUAL/ERROR or verify finds invalid/empty DQL")
     m.add_argument("--verify", action="store_true",
                    help="After conversion, validate all DQL against the tenant (query:verify)")
+    m.add_argument("--heal", action="store_true",
+                   help="Auto-fix known DQL lint/verify patterns on converted artifacts")
     m.add_argument("--env-url", help="Dynatrace env URL for --verify (or DYNATRACE_ENV_URL)")
     m.add_argument("--token-env", default="DT_API_TOKEN",
                    help="Env var holding the platform token for --verify (default: DT_API_TOKEN)")
@@ -497,6 +504,8 @@ def build_parser() -> argparse.ArgumentParser:
     ax.add_argument("--config", help="Mapping config JSON")
     ax.add_argument("--verify", action="store_true",
                     help="Validate converted DQL against the tenant after conversion")
+    ax.add_argument("--heal", action="store_true",
+                    help="Auto-fix known DQL patterns before/after verify")
     ax.add_argument("--env-url", help="Dynatrace env URL for --verify (or DYNATRACE_ENV_URL)")
     ax.add_argument("--token-env", default="DT_API_TOKEN",
                     help="Env var holding the platform token for --verify")

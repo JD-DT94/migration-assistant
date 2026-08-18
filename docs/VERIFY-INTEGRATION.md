@@ -1,154 +1,194 @@
-# Live DQL verify integration
+# Live DQL verify & auto-healing
 
-This document describes how **live schema validation** is wired into the e2d
-migration pipeline. It is the canonical reference for humans and AI tools
-working on verify, healing, or CI gates.
+Canonical reference for humans and AI tools working on validation, healing, CI
+gates, and the web GUI verify path in **migration-assistant** (`e2d`).
 
-## Overview
+## Pipeline overview
 
 ```
-e2d migrate samples/ -o out/ [--verify] [--env-url URL] [--data]
+e2d migrate samples/ -o out/ [--heal] [--verify] [--env-url URL] [--data]
   │
   ├─ classify → translate → offline lint (dql/validate.py)
   ├─ write artifacts (dashboards/, queries/, alerts/, pipelines/, terraform/)
+  ├─ [optional] heal_output_dir() — deterministic fixes on disk
   ├─ [optional] run_verify_sweep() → query:verify per DQL artifact
-  └─ MIGRATION_REPORT.md + migration_report.json (includes verify_results)
+  ├─ [optional] re-heal failed queries → re-verify (max 3 rounds)
+  └─ MIGRATION_REPORT.md + migration_report.json
 ```
 
-Offline lint runs **during** translation. Live verify runs **after** all
-artifacts are written, when `--verify` is passed.
+| Phase | When | Module |
+|-------|------|--------|
+| Offline lint | During translation | `dql/validate.py` |
+| Auto-heal | `--heal` after write (+ between verify rounds) | `dql/heal.py` |
+| Live verify | `--verify` (needs tenant creds) | `api/client.py` |
 
 ## CLI usage
 
-### Migrate with inline verify
+### Migrate with heal (offline fixes, no tenant needed)
+
+```bash
+e2d migrate samples/ -o /tmp/out --heal
+```
+
+Fixes known lint patterns on all DQL artifacts and records actions in the report.
+
+### Migrate with heal + live verify (full loop)
 
 ```bash
 export DYNATRACE_ENV_URL="https://<env-id>.apps.dynatrace.com"
 export DT_API_TOKEN="<platform-token>"
 
-e2d migrate samples/ -o /tmp/out --verify
-e2d migrate samples/ -o /tmp/out --verify --data      # also flag empty tiles
-e2d migrate samples/ -o /tmp/out --verify --strict    # exit 1 on invalid/empty DQL
+e2d migrate samples/ -o /tmp/out --heal --verify
+e2d migrate samples/ -o /tmp/out --heal --verify --data --strict
 ```
 
-### Standalone verify (unchanged)
+Loop (max 3 rounds):
+
+1. Heal all artifacts (offline lint rules)
+2. Verify against tenant
+3. Heal failed queries using verify errors
+4. Re-verify until clean or no progress
+
+### Standalone verify
 
 ```bash
 e2d verify /tmp/out --env-url "$DYNATRACE_ENV_URL"
-e2d verify /tmp/out --data
 ```
 
-### Assess with verify (CI)
+### CI assess gate
 
 ```bash
-e2d assess samples/ --verify --json report.json
-# exit 1 if verify finds invalid or empty queries
+e2d assess samples/ --heal --verify --json report.json
 ```
+
+## Auto-healing rules (`dql/heal.py`)
+
+| Code | Fix |
+|------|-----|
+| `array-arithmetic` | Insert `[]` on timeseries aliases in arithmetic |
+| `by-without-braces` | Wrap `by: field` → `by: {field}` |
+| `wrong-function-name` | `toLowercase`→`lower`, `toUppercase`→`upper`, `length`→`stringLength` |
+| `static-list-brackets` | `in(f, ["a"])` → `in(f, {"a"})` |
+| `assignment-in-filter` | Single `=` → `==` in filter stages |
+| `percentile-needs-rollup` | Insert `rollup: avg` before `interval:` |
+| `block-comment` | `/* … */` → `// …` |
+| `verify-error` | Re-apply function renames when verify mentions unknown functions |
+
+Healing **writes back** to converted artifacts:
+
+- `.dql` files (including multi-section querytext output)
+- Dashboard JSON tile/variable queries
+- OpenPipeline `.pipeline.json` stage scripts
+- Davis `.detectors.json` queries
 
 ## What gets verified
 
-`api/client.py` → `_iter_dql_artifacts()` collects DQL from:
+Same artifact set as healing — see `_iter_dql_artifacts()` in `api/client.py`.
 
-| Source | Label pattern |
-|--------|---------------|
-| `**/*.dql` | `queries/foo.dql` or `queries/foo.dql#section:<title>` |
-| Dashboard JSON tiles | `dashboards/foo.json#tile:<key>` |
-| Dashboard variables | `dashboards/foo.json#var:<key>` |
-| OpenPipeline settings | `pipelines/foo.pipeline.json#proc:<id>` |
-| Davis detectors | `alerts/foo.detectors.json#detector:<n>` |
-
-Dashboard variable references (`$Var`) are substituted with `""` before
-verify so queries still parse.
+Dashboard `$Variable` references are substituted with `""` before verify.
 
 ## API surface
 
-### `run_migration(..., verify=False, env_url=None, token=None, verify_data=False)`
-
-- **`verify`**: run live validation after conversion
-- **`env_url` / `token`**: Dynatrace tenant credentials
-- **`verify_data`**: execute valid queries and flag empty results
+### `run_migration(..., heal=False, verify=False, env_url=None, token=None, verify_data=False)`
 
 Returns `MigrationSummary` with:
 
-- `verify_results: List[VerifySweepResult]`
-- `verify_summary: Dict` — keys `total`, `ok`, `invalid`, `skipped`, `empty`
+| Field | Description |
+|-------|-------------|
+| `healing_applied` | List of `HealAction` (code, label, message) |
+| `verify_results` | List of `VerifySweepResult` |
+| `verify_summary` | Counts: total, ok, invalid, skipped, empty |
+
+### `heal_dql(dql, verify_errors=None) -> (str, List[HealAction])`
+
+Pure function — heal one query string.
+
+### `heal_output_dir(out_dir, labels=None, verify_errors=None) -> List[HealAction]`
+
+Scan output directory, heal, write back.
 
 ### `run_verify_sweep(out_dir, env_url, token, check_data=False)`
 
-Shared by `e2d verify` and `e2d migrate --verify`. Never raises; missing
-creds produce `valid=None` with `skipped_reason`.
+Shared by CLI and migrate; never raises.
 
-### `migration_report.json` fields
+## `migration_report.json` schema
 
 ```json
 {
-  "verify_summary": { "total": 12, "ok": 10, "invalid": 1, "skipped": 1, "empty": 0 },
+  "healing_applied": [
+    {"code": "by-without-braces", "label": "queries/q.dql", "message": "Wrapped 1 `by:` field list(s) in braces."}
+  ],
+  "verify_summary": {"total": 12, "ok": 11, "invalid": 0, "skipped": 1, "empty": 0},
   "verify_results": [
-    {
-      "label": "dashboards/foo.json#tile:t1",
-      "valid": false,
-      "errors": ["Parse error: ..."],
-      "warnings": []
-    }
+    {"label": "dashboards/foo.json#tile:t1", "valid": true, "errors": [], "warnings": []}
   ]
 }
 ```
 
-## Item status feedback
+## Web GUI
 
-When verify finds `valid=false`, matching migration items (by output path) get:
+The browser WASM build cannot call Dynatrace APIs. The local web server exposes:
 
-- Status bumped to **REVIEW** (via `_worst()`)
-- Note appended: `[WARN] Live DQL verify failed (<label>): <errors>`
+| Endpoint | Purpose |
+|----------|---------|
+| `POST /migrate` | Body may include `heal`, `verify`, `env_url`, `token`, `data` |
+| `POST /verify` | Verify converted output for a session (`env_url`, `token`, `data`) |
 
-Unmatched failures appear as a synthetic `verify` category item.
+Example:
+
+```json
+POST /verify
+X-Session: <session-id>
+{"env_url": "https://….apps.dynatrace.com", "token": "…", "data": false}
+```
+
+## CI
+
+| Workflow | Purpose |
+|----------|---------|
+| `.github/workflows/terraform-validate.yml` | `terraform init` + `validate` on generated modules |
+| `e2d assess --heal --verify` | Migration quality gate (needs tenant secret in CI) |
 
 ## Exit codes
 
 | Command | Non-zero when |
 |---------|---------------|
 | `migrate --strict` | MANUAL/ERROR items, or verify invalid/empty |
-| `migrate` (default) | never (informational) |
+| `migrate --heal` (alone) | never (informational) |
 | `verify` | invalid or empty queries |
-| `assess --verify` | converter errors, verify invalid/empty, or manual work (exit 2) |
-
-## Dependencies
-
-Live verify requires the optional **`[push]`** extra:
-
-```bash
-pip install -e ".[push,dev]"
-```
-
-Uses `requests` to call `/platform/storage/query/v1/query:verify`.
+| `assess --verify` | converter errors, verify failures, or manual work (exit 2) |
 
 ## Key files
 
 | File | Role |
 |------|------|
-| `src/e2d/api/client.py` | `verify_dql`, `_iter_dql_artifacts`, `run_verify_sweep` |
-| `src/e2d/migrate.py` | `_run_post_migration_verify`, `_apply_verify_to_items`, report section |
-| `src/e2d/score.py` | `verify_results` in `report_payload()` |
-| `src/e2d/cli.py` | `--verify`, `--env-url`, `--token-env`, `--data` on migrate/assess |
-| `src/e2d/dql/validate.py` | Offline lint (separate from live verify) |
-| `tests/test_migrate_verify.py` | Integration tests |
+| `src/e2d/dql/heal.py` | Auto-fixers + artifact write-back |
+| `src/e2d/dql/validate.py` | Offline lint rules |
+| `src/e2d/api/client.py` | Live verify + artifact iteration |
+| `src/e2d/migrate.py` | `_run_heal_verify_loop`, report sections |
+| `src/e2d/score.py` | JSON report payload |
+| `src/e2d/cli.py` | `--heal`, `--verify` flags |
+| `src/e2d/web/server.py` | `/verify` endpoint |
+| `tests/test_dql_heal.py` | Healer unit tests |
+| `tests/test_migrate_verify.py` | Migrate+verify integration |
 
-## Not yet implemented (healing roadmap)
+## Dependencies
 
-These are **out of scope** for the current verify integration but documented
-for follow-up work:
+```bash
+pip install -e ".[push,dev]"
+```
 
-1. **`dql/heal.py`** — auto-fix known lint rules (`array-arithmetic`, `by-without-braces`)
-2. **Fix-and-revalidate loop** — `convert → lint → heal → verify → re-verify (max N)` behind `--heal`
-3. **Web GUI `/verify` endpoint** — server-side verify for the browser UI (WASM is offline-only)
-4. **Terraform validate in CI** — `terraform validate` on generated modules
-5. **Settings schema pre-validation** — dry-run before detector/pipeline push
+Live verify requires `[push]` (`requests`). Healing is stdlib-only.
+
+## Not yet implemented
+
+1. **Settings schema pre-validation** — dry-run before detector/pipeline push
+2. **Browser UI button for /verify** — endpoint exists; page JS not wired yet
+3. **Broader verify-error heal registry** — only function-name patterns today
 
 ## Testing
 
 ```bash
-pytest tests/test_migrate_verify.py tests/test_verify.py -v
+pytest tests/test_dql_heal.py tests/test_migrate_verify.py tests/test_verify.py -v
+pytest tests/test_terraform_module.py -v   # needs terraform CLI
 ```
-
-Mock `run_verify_sweep` or `verify_dql` for unit tests; use a real tenant only
-for manual smoke tests.
