@@ -630,6 +630,10 @@ PAGE = r"""<!DOCTYPE html>
            font-family:"Segoe UI Variable Display","Segoe UI",system-ui,sans-serif; }
   .pdesc { font-size:13.5px; line-height:1.6; color:var(--mut); font-weight:400; }
   .pgo { margin-top:auto; font-size:13px; font-weight:650; color:var(--teal); }
+  .pmark { width:36px; height:36px; border-radius:10px; display:grid; place-items:center;
+           font:800 13px ui-monospace,Consolas,monospace; letter-spacing:.02em; }
+  .pmark.el { background:rgba(77,141,255,.16); color:#7cc4ff; }
+  .pmark.ap { background:rgba(45,212,191,.14); color:var(--teal); }
   .pickfoot { text-align:center; max-width:60ch; margin:18px auto 0; }
   .platintro { padding:34px 0 18px; }
   .platintro h1 { font-size:clamp(26px,4vw,36px); }
@@ -642,6 +646,12 @@ PAGE = r"""<!DOCTYPE html>
        -webkit-background-clip:text; background-clip:text; color:transparent; }
   .tagline { margin:0 auto; max-width:58ch; color:var(--mut); font-size:15.5px; }
   .tagline strong { color:var(--ink); font-weight:600; }
+  .outcomes { display:flex; flex-wrap:wrap; justify-content:center; gap:8px; margin:18px auto 0; }
+  .outcome { font:600 11px ui-monospace,Consolas,monospace; letter-spacing:.06em;
+             text-transform:uppercase; padding:5px 11px; border-radius:999px;
+             border:1px solid var(--line2); color:var(--mut); background:rgba(255,255,255,.03); }
+  .outcome.tf { border-color:rgba(77,141,255,.45); color:#9fc3f5;
+                background:rgba(77,141,255,.12); }
   h2 { font-size:20px; font-weight:650; letter-spacing:-.01em; margin:44px 0 6px;
        font-family:"Segoe UI Variable Display","Segoe UI",system-ui,sans-serif; }
   .lede { color:var(--mut); margin:0 0 16px; font-size:14px; }
@@ -656,8 +666,11 @@ PAGE = r"""<!DOCTYPE html>
                            color:var(--ink); }
   #drop svg { display:block; margin:0 auto 12px; color:var(--blue); opacity:.9; }
   #drop strong { color:var(--ink); font-size:16px; }
-  .files { list-style:none; padding:0; margin:14px 0 0; font-size:13px; color:var(--mut); }
-  .files li { padding:2px 0; }
+  .files { list-style:none; padding:0; margin:14px 0 0; display:flex; flex-wrap:wrap; gap:6px; }
+  .files li { display:inline-flex; align-items:center; gap:8px; padding:5px 10px;
+              border:1px solid var(--line2); border-radius:999px; font-size:12.5px;
+              background:rgba(255,255,255,.03); color:var(--ink); }
+  .files .note { font-size:11.5px; }
   button { font:600 14px/1 "Segoe UI Variable Text","Segoe UI",system-ui,sans-serif;
            color:#fff; background:linear-gradient(180deg,#4d8dff,#2f6fe0);
            border:1px solid rgba(255,255,255,.16); border-radius:10px;
@@ -671,6 +684,10 @@ PAGE = r"""<!DOCTYPE html>
   .pill { display:inline-flex; align-items:center; gap:7px; font-size:12.5px; font-weight:600;
           padding:5px 12px; border-radius:999px; border:1px solid var(--line);
           background:rgba(255,255,255,.03); color:var(--mut); }
+  .pill.ok { background:rgba(52,192,124,.12); border-color:rgba(52,192,124,.32); color:var(--ok); }
+  .pill.rev { background:rgba(224,166,60,.12); border-color:rgba(224,166,60,.32); color:var(--rev); }
+  .pill.man { background:rgba(224,123,74,.12); border-color:rgba(224,123,74,.32); color:var(--man); }
+  .pill.err { background:rgba(229,84,78,.12); border-color:rgba(229,84,78,.32); color:var(--err); }
   .ok b{color:var(--ok)} .rev b{color:var(--rev)} .man b{color:var(--man)} .err b{color:var(--err)}
   table { width:100%; border-collapse:collapse; margin-top:8px; font-size:13.5px; }
   th,td { text-align:left; padding:8px 6px; border-bottom:1px solid var(--line); vertical-align:top; }
@@ -692,21 +709,29 @@ PAGE = r"""<!DOCTYPE html>
   .item-head { display:flex; align-items:center; gap:10px; padding:11px 14px; cursor:pointer;
                user-select:none; }
   .item-head:hover { background:rgba(255,255,255,.03); }
-  .item-head .src { font-weight:600; }
-  .item-head .cat { color:var(--faint); font-size:12px; }
+  .item-head .src { font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
+  .item-head .cat { color:var(--faint); font-size:12px; flex:0 0 auto; }
   .item-head .chev { margin-left:auto; color:var(--faint); transition:transform .15s; }
   .item.open .chev { transform:rotate(90deg); }
   .badge { display:inline-flex; align-items:center; gap:6px; font-size:11.5px; font-weight:600;
            padding:3px 10px; border-radius:999px; border:1px solid var(--line);
            background:rgba(255,255,255,.03); color:var(--mut); }
-  .badge.ok{color:var(--ok)} .badge.rev{color:var(--rev)} .badge.man{color:var(--man)}
-  .badge.err{color:var(--err)} .badge.dql{color:var(--rev)}
+  .badge.ok{color:var(--ok);background:rgba(52,192,124,.12);border-color:rgba(52,192,124,.32)}
+  .badge.rev{color:var(--rev);background:rgba(224,166,60,.12);border-color:rgba(224,166,60,.32)}
+  .badge.man{color:var(--man);background:rgba(224,123,74,.12);border-color:rgba(224,123,74,.32)}
+  .badge.err{color:var(--err);background:rgba(229,84,78,.12);border-color:rgba(229,84,78,.32)}
+  .badge.dql{color:var(--rev);background:rgba(224,166,60,.1)}
+  .badge.tf{color:#9fc3f5;background:rgba(77,141,255,.12);border-color:rgba(77,141,255,.32)}
   .item-body { display:none; padding:0 14px 14px; }
   .item.open .item-body { display:block; }
   .item-body .notes { margin:10px 0 4px; padding-left:18px; }
   .art { margin-top:12px; }
   .art-head { display:flex; align-items:center; gap:10px; margin-bottom:4px; }
   .art-head .path { font-family:ui-monospace,Consolas,monospace; font-size:12px; color:var(--mut); }
+  .lang { font:600 10px ui-monospace,Consolas,monospace; letter-spacing:.08em;
+          text-transform:uppercase; color:var(--faint); border:1px solid var(--line2);
+          border-radius:6px; padding:1px 6px; }
+  .lang.hcl { color:#9fc3f5; border-color:rgba(77,141,255,.35); }
   .copy { margin:0 0 0 auto; padding:5px 14px; font-size:12px; background:transparent;
           border-color:var(--line2); color:var(--mut); box-shadow:none; }
   .copy.done { background:linear-gradient(180deg,#3bc98a,#27a56d); color:#06210f;
@@ -845,6 +870,19 @@ PAGE = r"""<!DOCTYPE html>
   .gap { border:1px solid rgba(224,166,60,.35); background:rgba(224,166,60,.06);
          border-radius:10px; padding:12px 16px; margin-top:14px; }
   .gap ul { margin:6px 0 0; padding-left:18px; }
+  .export { display:flex; flex-wrap:wrap; gap:14px; align-items:center;
+            margin:0 0 22px; padding:16px 18px; border-radius:14px;
+            border:1px solid rgba(77,141,255,.28);
+            background:linear-gradient(180deg,rgba(77,141,255,.12),rgba(77,141,255,.04)); }
+  .export .lead { flex:1 1 240px; min-width:0; }
+  .export h3 { margin:0 0 4px; font-size:15.5px; font-weight:650; }
+  .export p { margin:0; font-size:13px; color:var(--mut); line-height:1.5; }
+  .export .dls { margin-top:0; }
+  .kinds { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
+  @media (prefers-reduced-motion: reduce) {
+    .pcard, .feat, .item-head .chev { transition:none; }
+    .pcard:hover, .feat:hover { transform:none; }
+  }
 </style>
 </head>
 <body>
@@ -868,10 +906,18 @@ PAGE = r"""<!DOCTYPE html>
        <strong>Dynatrace Terraform module</strong> you can copy into a repo and apply.
        Dashboards, detectors, pipelines, SLOs and maintenance windows ship as one child module.
        Everything runs on this machine. Nothing is uploaded anywhere.</p>
+    <div class="outcomes">
+      <span class="outcome tf">Terraform module</span>
+      <span class="outcome">Platform dashboards</span>
+      <span class="outcome">Davis detectors</span>
+      <span class="outcome">OpenPipeline</span>
+      <span class="outcome">SLOs</span>
+    </div>
   </div>
 
   <div class="picker v v-home">
     <button class="pcard" data-view="elastic">
+      <span class="pmark el">ES</span>
       <span class="pname">Elastic</span>
       <span class="pdesc">Kibana dashboards, ES|QL / Query DSL / KQL / Lucene, Logstash and
         ingest pipelines, watchers and alerting rules, transforms, SLOs, Beats configs and
@@ -879,6 +925,7 @@ PAGE = r"""<!DOCTYPE html>
       <span class="pgo">Start converting &#8594;</span>
     </button>
     <button class="pcard" data-view="appd">
+      <span class="pmark ap">AD</span>
       <span class="pname">AppDynamics</span>
       <span class="pdesc">Health rules, custom dashboards, application/tier/node inventory,
         policies and actions &mdash; plus a OneAgent onboarding plan sized by host rather
@@ -1185,8 +1232,8 @@ PAGE = r"""<!DOCTYPE html>
         <rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/></svg></div>
       <h3>Kibana dashboards</h3>
       <p>Lens incl. formulas, TSVB, legacy visualizations, saved searches, controls, and Vega
-         with an embedded ES query <b>&#8594; dashboard JSON</b> with DQL tiles, variables and
-         series colours. Import in the Dashboards app or push from here.</p>
+         with an embedded ES query <b>&#8594; dynatrace_document</b> Terraform (platform
+         Dashboards app JSON sidecars). Import in the Dashboards app or apply the module.</p>
     </div>
     <div class="feat">
       <div class="ic"><svg width="18" height="18" viewBox="0 0 24 24" fill="none"
@@ -1242,9 +1289,9 @@ PAGE = r"""<!DOCTYPE html>
         <line x1="6" y1="12" x2="2" y2="12"/><line x1="12" y1="6" x2="12" y2="2"/>
         <line x1="12" y1="22" x2="12" y2="18"/></svg></div>
       <h3>SLOs</h3>
-      <p>Kibana SLO definitions <b>&#8594; DQL SLI queries</b> with the objective and
-         window carried over, ready for the SLO app or API. APM indicators are flagged
-         for the service-native path.</p>
+      <p>Kibana SLO definitions <b>&#8594; dynatrace_platform_slo</b> with a
+         <code>makeTimeseries</code> DQL SLI. APM indicators are flagged for the
+         service-native path.</p>
     </div>
     <div class="feat">
       <div class="ic"><svg width="18" height="18" viewBox="0 0 24 24" fill="none"
@@ -1360,7 +1407,8 @@ const drop = $("#drop"), picker = $("#picker"), filelist = $("#filelist"),
 let chosen = [];
 
 function showFiles() {
-  filelist.innerHTML = chosen.map(f => `<li>• ${f.name} <span class="note">(${(f.size/1024|0)} KB)</span></li>`).join("");
+  filelist.innerHTML = chosen.map(f =>
+    `<li>${esc(f.name)} <span class="note">${(f.size/1024|0)} KB</span></li>`).join("");
   go.disabled = chosen.length === 0;
 }
 function addFiles(list) { chosen = chosen.concat([...list]); showFiles(); }
@@ -1546,6 +1594,7 @@ function itemCard(it, idx) {
           <span class="src">${esc(it.source)}</span>
           <span class="cat">${esc(it.category)}</span>
           ${dqlNotes.length ? `<span class="badge dql">DQL ${dqlNotes.length}</span>` : ""}
+          ${(it.outputs||[]).includes("terraform/") ? `<span class="badge tf">TF</span>` : ""}
           <span class="chev">&#9656;</span>
         </div>`;
   h += `<div class="item-body">`;
@@ -1566,6 +1615,7 @@ function itemCard(it, idx) {
     h += `<div class="art">
             <div class="art-head">
               <span class="path">${esc(a.path)}</span>
+              ${a.lang && a.lang !== "text" ? `<span class="lang${a.lang==="hcl"?" hcl":""}">${esc(a.lang)}</span>` : ""}
               ${a.truncated ? `<span class="note">(truncated)</span>` : ""}
               <button class="copy" data-copy>Copy</button>
             </div>
@@ -1578,10 +1628,41 @@ function itemCard(it, idx) {
   return h;
 }
 
+function terraformKinds(d) {
+  const map = [["dashboard", "dashboards"], ["alert", "detectors"],
+               ["pipeline", "pipelines"], ["slo", "SLOs"],
+               ["maintenance", "maintenance"], ["request_attribute", "request attributes"]];
+  return map.filter(([cat]) => (d.items||[]).some(it => it.category === cat
+      && (it.outputs||[]).some(o => o === "terraform/" || o.startsWith("terraform/"))))
+    .map(([, label]) => label);
+}
+
+function exportBar(d) {
+  if (!d.download && !d.download_terraform) return "";
+  const kinds = terraformKinds(d);
+  const chips = kinds.length
+    ? `<div class="kinds">${kinds.map(k => `<span class="outcome">${esc(k)}</span>`).join("")}</div>`
+    : "";
+  let buttons = `<div class="dls">`;
+  if (d.download_terraform)
+    buttons += `<a class="dl tf" href="${d.download_terraform}">Download Terraform module</a>`;
+  if (d.download)
+    buttons += `<a class="dl" href="${d.download}">All artifacts</a>`;
+  buttons += `</div>`;
+  const lead = d.download_terraform
+    ? `<h3>Your Terraform module is ready</h3>
+       <p>A child module you can copy into a repo or apply from <code>example-root/</code>.
+          Detectors stay off until you flip <code>detectors_enabled</code>.</p>${chips}`
+    : `<h3>Converted artifacts</h3>
+       <p>Download the bundle. Choose Terraform in the export selector to get an applyable module.</p>`;
+  return `<div class="export"><div class="lead">${lead}</div>${buttons}</div>`;
+}
+
 function render(d) {
   LAST = d;
   const c = d.counts;
-  let h = `<h2 style="margin-top:0">Converted ${d.total} item(s)</h2>`;
+  let h = exportBar(d);
+  h += `<h2 style="margin-top:0">Converted ${d.total} item(s)</h2>`;
   h += `<div class="counts">
     <span class="pill ok"><b>${c.OK}</b> ready</span>
     <span class="pill rev"><b>${c.REVIEW}</b> review</span>
@@ -1600,8 +1681,10 @@ function render(d) {
           </div>`;
     const CATS = [["onboarding", "OneAgent onboarding"], ["dashboard", "Dashboards"],
       ["query", "Queries"], ["pipeline", "Pipelines"], ["alert", "Alerts & health rules"],
-      ["slo", "SLOs"], ["shipper", "Shippers"], ["synthetic", "Synthetic monitors"],
+      ["slo", "SLOs"], ["maintenance", "Maintenance windows"],
+      ["shipper", "Shippers"], ["synthetic", "Synthetic monitors"],
       ["transform", "Transforms"], ["notification", "Alert routing"],
+      ["request_attribute", "Request attributes"],
       ["config", "Cluster config"]];
     const known = new Set(CATS.map(c => c[0]));
     for (const [cat, title] of CATS) {
@@ -1622,11 +1705,6 @@ function render(d) {
     h += `<h2>Not converted</h2><ul>` +
          d.skipped.map(s=>`<li class="note"><code>${esc(s)}</code></li>`).join("") + `</ul>`;
   }
-  h += `<div class="dls">`;
-  if (d.download_terraform) {
-    h += `<a class="dl tf" href="${d.download_terraform}">Download Terraform module (.zip)</a>`;
-  }
-  h += `<a class="dl" href="${d.download}">Download all converted artifacts (.zip)</a></div>`;
   h += deployPanel(d);
   result.innerHTML = h;
   result.classList.remove("hide");
