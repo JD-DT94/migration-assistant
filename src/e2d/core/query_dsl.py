@@ -76,6 +76,25 @@ def parse_query(q: Optional[Dict[str, Any]], config, data_object, report) -> Opt
         return Regex(field, str(_val(val)))
     if kind in ("query_string", "simple_query_string"):
         return translate_lucene(body.get("query", ""), config, data_object, report)
+    if kind == "multi_match":
+        text = str(body.get("query", ""))
+        fields = body.get("fields") or ["message"]
+        cleaned = []
+        for f in fields:
+            name = str(f).split("^")[0]
+            if name:
+                cleaned.append(name)
+        if not cleaned:
+            cleaned = ["message"]
+        report.warn("`multi_match` has no analyzed multi-field equivalent in DQL; "
+                    "emitted as an OR of field matches. Review if scoring/fuzziness "
+                    "mattered.")
+        nodes = [parse_query({"match": {f: text}}, config, data_object, report)
+                 for f in cleaned]
+        nodes = [n for n in nodes if n]
+        if not nodes:
+            return None
+        return nodes[0] if len(nodes) == 1 else Or(nodes)
     if kind == "match_all":
         return None
     report.warn(f"Unsupported query clause `{kind}`; skipped.")

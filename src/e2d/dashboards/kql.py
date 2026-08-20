@@ -1,21 +1,29 @@
-"""KQL (Kibana Query Language / kuery) -> DQL boolean-expression translator.
+"""KQL (Kibana Query Language / kuery) -> filter IR -> DQL.
 
-Used for dashboard panel queries (`searchSourceJSON.query`) and for the KQL
-embedded inside `filters` aggregations. Produces a DQL expression string
-suitable for a `filter` command or a `countIf(...)` predicate.
+Used for dashboard panel queries (`searchSourceJSON.query`), SLO countIf
+predicates, and the KQL inside `filters` aggregations. The parser produces the
+same filter IR as Lucene and Query DSL; ``FilterEmitter`` is the only place that
+knows DQL operator syntax.
 
-Supported: `field : value`, `field : (a or b)` -> in(), `field : *` -> isNotNull,
-wildcards (`*`) -> matchesValue, ranges (`>`,`>=`,`<`,`<=`), AND/OR/NOT,
-parentheses, and bare full-text terms -> matchesPhrase(content, ...).
+Supported: `field : value`, `field : (a or b)` -> In(), `field : *` -> Exists,
+wildcards (`*`) -> Wildcard, ranges (`>`,`>=`,`<`,`<=`) including ES date math,
+AND/OR/NOT, parentheses, and bare full-text terms -> Phrase.
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Union
 
 from e2d.config import MappingConfig
+from e2d.core.filter_ir import (
+    TIME_FIELDS, And, Compare, Exists, In, Node, Not, Or, Phrase, TimeRange,
+    Wildcard, emit_filter, strip_keyword,
+)
 from e2d.report import Report
+
+_DATE_MATH = re.compile(r"^now([-+/]|$)")
 
 
 # --------------------------------------------------------------------------- #
@@ -70,7 +78,6 @@ def _tokenize(s: str) -> List[K]:
             if i + 1 < n and s[i + 1] == "=":
                 toks.append(K(T_OP, c + "=")); i += 2; continue
             toks.append(K(T_OP, c)); i += 1; continue
-        # bareword: letters, digits, dots, wildcards, common field chars
         j = i
         while j < n and not s[j].isspace() and s[j] not in '():<>"':
             j += 1
@@ -80,7 +87,7 @@ def _tokenize(s: str) -> List[K]:
 
 
 # --------------------------------------------------------------------------- #
-# parser + emitter (single pass, emits DQL string)
+# parser (KQL -> filter IR)
 # --------------------------------------------------------------------------- #
 
 class KqlParser:
@@ -105,9 +112,9 @@ class KqlParser:
         t = self._peek()
         return t is not None and t.type == T_WORD and t.value.lower() == word
 
-    def parse(self) -> str:
+    def parse(self) -> Optional[Node]:
         if not self.toks:
-            return ""
+            return None
         return self._or()
 
     def _skip_dup_ops(self) -> None:
@@ -120,30 +127,40 @@ class KqlParser:
             else:
                 break
 
-    def _or(self) -> str:
+    def _or(self) -> Optional[Node]:
+        nodes: List[Node] = []
         left = self._and()
+        if left:
+            nodes.append(left)
         while self._is_kw("or"):
             self._next()
             self._skip_dup_ops()
             right = self._and()
-            left = f"{left} or {right}"
-        return left
+            if right:
+                nodes.append(right)
+        if not nodes:
+            return None
+        return nodes[0] if len(nodes) == 1 else Or(nodes)
 
-    def _and(self) -> str:
+    def _and(self) -> Optional[Node]:
+        nodes: List[Node] = []
         left = self._not()
+        if left:
+            nodes.append(left)
         while True:
             if self._is_kw("and"):
                 self._next()
                 self._skip_dup_ops()
                 right = self._not()
-                left = f"{left} and {right}"
             elif self._implicit_and():
-                # adjacent expressions with no operator -> AND (KQL default)
                 right = self._not()
-                left = f"{left} and {right}"
             else:
                 break
-        return left
+            if right:
+                nodes.append(right)
+        if not nodes:
+            return None
+        return nodes[0] if len(nodes) == 1 else And(nodes)
 
     def _implicit_and(self) -> bool:
         t = self._peek()
@@ -155,61 +172,51 @@ class KqlParser:
             return False
         return t.type in (T_WORD, T_STRING, T_LP)
 
-    def _not(self) -> str:
+    def _not(self) -> Optional[Node]:
         if self._is_kw("not"):
             self._next()
-            return f"not ({self._primary()})"
+            inner = self._primary()
+            return Not(inner) if inner is not None else None
         return self._primary()
 
-    def _primary(self) -> str:
+    def _primary(self) -> Optional[Node]:
         t = self._peek()
         if t is None:
-            return ""
+            return None
         if t.type == T_LP:
             self._next()
             inner = self._or()
             if self._peek() and self._peek().type == T_RP:
                 self._next()
-            return f"({inner})"
+            return inner
         if t.type in (T_STRING, T_WORD):
-            # lookahead for ':' (field match — KQL allows quoted field names)
-            # or operator (range)
             nxt = self.toks[self.pos + 1] if self.pos + 1 < len(self.toks) else None
             if nxt and nxt.type == T_COLON:
                 return self._field_match()
             if t.type == T_WORD and nxt and nxt.type == T_OP:
                 return self._range()
-            # bare term / quoted phrase
             self._next()
-            return self._full_text(t.value)
+            return Phrase(t.value)
         self._next()
-        return ""
+        return None
 
-    # -- field expressions ------------------------------------------------
-    def _resolve(self, raw_field: str) -> str:
-        name = raw_field
-        if name.endswith(".keyword"):
-            name = name[: -len(".keyword")]
-            self.report.info(f"Dropped `.keyword` suffix from `{raw_field}`.")
-        return self.config.resolve_field(name, self.data_object)
-
-    def _field_match(self) -> str:
-        field_tok = self._next()  # word
+    def _field_match(self) -> Optional[Node]:
+        field_tok = self._next()
         self._next()  # colon
-        field = self._resolve(field_tok.value)
+        field = field_tok.value
         nxt = self._peek()
         if nxt and nxt.type == T_LP:
             return self._value_list(field)
         val = self._next()
         if val is None:
-            return ""
+            return None
         if val.type == T_WORD and val.value == "*":
-            return f"isNotNull({_q(field)})"
-        return _match(field, val.value, val.type == T_STRING, self.report)
+            return Exists(field)
+        return self._match_node(field, val.value, val.type == T_STRING)
 
-    def _value_list(self, field: str) -> str:
+    def _value_list(self, field: str) -> Optional[Node]:
         self._next()  # '('
-        values: List[str] = []
+        values: List[tuple] = []
         op = "or"
         while True:
             t = self._peek()
@@ -220,89 +227,84 @@ class KqlParser:
                 self._next()
                 continue
             tok = self._next()
-            values.append(tok.value)
+            values.append((tok.value, tok.type == T_STRING))
         if self._peek() and self._peek().type == T_RP:
             self._next()
-        if op == "or" and all("*" not in v for v in values):
-            items = ", ".join(_lit(v) for v in values)
-            return f"in({_q(field)}, {{{items}}})"
-        joiner = f" {op} "
-        return "(" + joiner.join(_match(field, v, True, self.report) for v in values) + ")"
+        if not values:
+            return None
+        if op == "or" and all("*" not in v and "?" not in v for v, _ in values):
+            return In(field, [_typed(v, q) for v, q in values])
+        nodes = [n for n in (self._match_node(field, v, q) for v, q in values) if n]
+        if not nodes:
+            return None
+        if len(nodes) == 1:
+            return nodes[0]
+        return Or(nodes) if op == "or" else And(nodes)
 
-    def _range(self) -> str:
+    def _range(self) -> Optional[Node]:
         field_tok = self._next()
         op_tok = self._next()
         val = self._next()
-        field = self._resolve(field_tok.value)
-        rhs = val.value if val else ""
-        return f"{_q(field)} {op_tok.value} {_lit(rhs)}"
+        field = field_tok.value
+        raw = val.value if val else ""
+        quoted = bool(val and val.type == T_STRING)
+        if _is_time_range(field, raw):
+            bound = {">=": "gte", ">": "gt", "<=": "lte", "<": "lt"}.get(op_tok.value)
+            if bound:
+                return TimeRange(field=field, **{bound: raw})
+        return Compare(field, op_tok.value, _typed(raw, quoted))
 
-    def _full_text(self, term: str) -> str:
-        # bare term / quoted phrase with no field -> match against log body
-        target = "content" if (self.data_object in (None, "logs")) else "content"
-        self.report.warn(
-            f"Bare full-text term `{term}` mapped to matchesPhrase({target}, ...); "
-            "verify the target field for this data object.")
-        return f'matchesPhrase({target}, "{_esc(term)}")'
-
-
-# --------------------------------------------------------------------------- #
-# helpers
-# --------------------------------------------------------------------------- #
-
-def _esc(s: str) -> str:
-    return s.replace("\\", "\\\\").replace('"', '\\"')
-
-
-def _q(field: str) -> str:
-    if field and all(ch.isalnum() or ch in "._" for ch in field):
-        return field
-    return f"`{field}`"
+    def _match_node(self, field: str, value: str, quoted: bool) -> Node:
+        if "*" in value or "?" in value:
+            return Wildcard(field, value)
+        mapped = self.config.resolve_field(strip_keyword(field), self.data_object)
+        if mapped == "content":
+            self.report.info("Match on the log body mapped to matchesPhrase(content, ...); "
+                             "`==` would require the entire log line to equal the value.")
+            return Phrase(value, field=field)
+        return Compare(field, "==", _typed(value, quoted))
 
 
-def _lit(v: str) -> str:
-    # numbers and booleans pass through; everything else becomes a quoted string
-    low = v.lower()
-    if low in ("true", "false"):
-        return low
+def _typed(value: str, quoted: bool) -> Union[str, int, float, bool]:
+    if quoted:
+        return value
+    low = value.lower()
+    if low == "true":
+        return True
+    if low == "false":
+        return False
     try:
-        float(v)
-        return v
+        return float(value) if "." in value else int(value)
     except ValueError:
-        return f'"{_esc(v)}"'
+        return value
 
 
-def _match(field: str, value: str, was_quoted: bool, report: Report) -> str:
-    fq = _q(field)
-    if "*" in value or "?" in value:
-        # KQL wildcards -> DQL matchesValue (supports leading/trailing *)
-        report.info(f"KQL wildcard `{value}` mapped to matchesValue().")
-        return f'matchesValue({fq}, "{_esc(value)}")'
-    if field == "content":
-        # ES matches analyzed text (the value occurring IN the message); DQL ==
-        # would require the whole log line to equal the value, which is silently
-        # wrong for the log body.
-        report.info("Match on the log body mapped to matchesPhrase(content, ...); "
-                    "`==` would require the entire log line to equal the value.")
-        return f'matchesPhrase({fq}, "{_esc(value)}")'
-    # A quoted KQL value is always a string, even if it looks numeric ("1").
-    rhs = f'"{_esc(value)}"' if was_quoted else _lit(value)
-    return f"{fq} == {rhs}"
+def _is_time_range(field: str, raw: str) -> bool:
+    if strip_keyword(field) in TIME_FIELDS:
+        return True
+    return bool(isinstance(raw, str) and _DATE_MATH.match(raw.strip()))
+
+
+def parse_kql(query: str, config: MappingConfig, data_object: Optional[str],
+              report: Report) -> Optional[Node]:
+    """Parse a KQL string into filter IR. Empty -> None."""
+    if not query or not str(query).strip():
+        return None
+    tokens = _tokenize(query)
+    parser = KqlParser(tokens, config, data_object, report)
+    node = parser.parse()
+    if parser.pos < len(tokens):
+        rest = " ".join(t.value for t in tokens[parser.pos:])
+        report.warn(f"KQL query only partially translated; unparsed trailing input `{rest[:60]}` "
+                    "was dropped — review.", source=query[:80])
+    return node
 
 
 def translate_kql(query: str, config: MappingConfig, data_object: Optional[str],
                   report: Report) -> str:
     """Translate a KQL string into a DQL boolean expression. Empty -> ''."""
-    if not query or not query.strip():
-        return ""
-    tokens = _tokenize(query)
-    parser = KqlParser(tokens, config, data_object, report)
-    out = parser.parse()
-    if parser.pos < len(tokens):
-        rest = " ".join(t.value for t in tokens[parser.pos:])
-        report.warn(f"KQL query only partially translated; unparsed trailing input `{rest[:60]}` "
-                    "was dropped — review.", source=query[:80])
-    return out
+    node = parse_kql(query, config, data_object, report)
+    return emit_filter(node, config, data_object, report) if node is not None else ""
 
 
 def translate_query_string(query: Any, language: Optional[str], config: MappingConfig,
@@ -312,7 +314,6 @@ def translate_query_string(query: Any, language: Optional[str], config: MappingC
     if not query or not str(query).strip():
         return ""
     if language == "lucene":
-        from e2d.core.filter_ir import emit_filter
         from e2d.core.lucene import translate_lucene
         node = translate_lucene(str(query), config, data_object, report)
         return emit_filter(node, config, data_object, report) if node is not None else ""

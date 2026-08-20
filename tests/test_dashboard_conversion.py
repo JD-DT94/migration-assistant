@@ -146,6 +146,13 @@ def test_cardinality_to_countdistinct():
     assert "countDistinct(user.id)" in " ".join(plan.metrics)
 
 
+def test_search_filter_range_date_math():
+    filters = [{"meta": {"type": "range", "key": "ts",
+                         "params": {"gte": "now-15m"}}}]
+    preds = translate_search_filters(filters, MappingConfig(), "logs", Report())
+    assert preds == ["ts >= now()-15m"]
+
+
 def test_search_filter_phrase_and_exists():
     filters = [
         {"meta": {"type": "phrase", "key": "env.keyword", "params": {"query": "prod"}}},

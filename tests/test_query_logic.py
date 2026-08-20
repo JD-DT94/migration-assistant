@@ -167,8 +167,28 @@ def test_backfill_flatten_lowercases_keys_like_ingest_does():
 
 def test_negated_groups_and_exists():
     out, _ = dql("kql", "not (status: 500 or status: 503)")
-    assert "not ((status == 500 or status == 503))" in out
+    assert "not (status == 500 or status == 503)" in out
     out, _ = dql("kql", "not user.id: *")
     assert "not (isNotNull(user.id))" in out
     out, _ = dql("lucene", "NOT (status:500 OR status:503)")
     assert "not (status == 500 or status == 503)" in out
+
+
+def test_kql_date_math_is_not_a_quoted_literal():
+    out, _ = dql("kql", "@timestamp >= now-1h and status: 500")
+    assert "from:now()-1h" in out and '"now-1h"' not in out
+    assert "status == 500" in out
+
+
+def test_lucene_time_range_lands_on_fetch_timeframe():
+    out, _ = dql("lucene", "@timestamp:[now-1h TO now]")
+    assert "from:now()-1h" in out and "to:now()" in out
+    assert "| filter" not in out
+
+
+def test_multi_match_becomes_or_of_field_matches():
+    out, r = dql("dsl", json.dumps({
+        "query": {"multi_match": {"query": "timeout", "fields": ["message", "error"]}}}))
+    assert "matchesPhrase(content, \"timeout\")" in out
+    assert 'error == "timeout"' in out or "error" in out
+    assert any("multi_match" in n for n in r["notes"])

@@ -1,14 +1,11 @@
 """Translate Kibana legacy-visualization aggregations + searchSource filters
 into a DQL query body.
 
-A legacy visualization is a list of `aggs`, each tagged with a `schema`:
-  * metric  schema -> the value (count, cardinality, avg, ...)
-  * bucket  schema (segment/group/bucket/split) -> grouping
-    - terms          -> summarize ..., by:{field} | sort | limit
-    - date_histogram -> makeTimeseries ..., interval:
-    - filters        -> one countIf(<kql>) per labelled filter
-
-The result is a structured `AggPlan` the converter turns into DQL command lines.
+Lens already builds the shared ``AggTree``. Legacy vis aggs still go through
+``AggPlan`` (stringly-typed summarize / makeTimeseries) because the filters
+bucket expands into labelled ``countIf`` columns rather than a bucket dimension.
+Search-source filters parse through Query DSL filter IR so date math, `.keyword`
+stripping and field maps match every other front-end.
 """
 
 from __future__ import annotations
@@ -240,6 +237,8 @@ def build_agg_plan(aggs: List[Dict[str, Any]], config: MappingConfig,
 def translate_search_filters(filters: List[Dict[str, Any]], config: MappingConfig,
                              data_object: Optional[str], report: Report) -> List[str]:
     preds: List[str] = []
+    from e2d.core.filter_ir import emit_filter
+    from e2d.core.query_dsl import parse_query
     for fl in filters:
         meta = fl.get("meta", {})
         if meta.get("disabled"):
@@ -247,31 +246,18 @@ def translate_search_filters(filters: List[Dict[str, Any]], config: MappingConfi
         key = meta.get("key")
         ftype = meta.get("type")
         negate = meta.get("negate", False)
-        pred = None
-        if key and key.endswith(".keyword"):
-            key = key[: -len(".keyword")]
-        mapped = config.resolve_field(key, data_object) if key else None
+        node = None
         if ftype == "exists":
-            pred = f"isNotNull({_q(mapped)})"
+            node = parse_query({"exists": {"field": key}}, config, data_object, report)
         elif ftype == "phrase":
             val = meta.get("params", {}).get("query", meta.get("value"))
-            pred = f"{_q(mapped)} == {_lit(val)}"
+            node = parse_query({"term": {key: val}}, config, data_object, report)
         elif ftype == "phrases":
             vals = meta.get("params", []) or []
-            items = ", ".join(_lit(v) for v in vals)
-            pred = f"in({_q(mapped)}, {{{items}}})"
+            node = parse_query({"terms": {key: vals}}, config, data_object, report)
         elif ftype == "range":
-            rng = meta.get("params", {})
-            parts = []
-            if "gte" in rng:
-                parts.append(f"{_q(mapped)} >= {_lit(rng['gte'])}")
-            if "gt" in rng:
-                parts.append(f"{_q(mapped)} > {_lit(rng['gt'])}")
-            if "lte" in rng:
-                parts.append(f"{_q(mapped)} <= {_lit(rng['lte'])}")
-            if "lt" in rng:
-                parts.append(f"{_q(mapped)} < {_lit(rng['lt'])}")
-            pred = " and ".join(parts) if parts else None
+            node = parse_query({"range": {key: meta.get("params", {})}},
+                               config, data_object, report)
         elif ftype == "combined":
             # Kibana 8 combined filter: meta.params is a list of sub-filters
             # joined by meta.relation (AND/OR).
@@ -280,28 +266,19 @@ def translate_search_filters(filters: List[Dict[str, Any]], config: MappingConfi
             sub = translate_search_filters(meta.get("params") or [], config,
                                            data_object, report)
             pred = f" {rel} ".join(f"({p})" for p in sub) if sub else None
+            if pred:
+                preds.append(f"not ({pred})" if negate else pred)
+            continue
         elif ftype == "custom" or (ftype is None and fl.get("query")):
-            # pinned/custom filter carrying raw Elasticsearch query DSL
-            from e2d.core.filter_ir import emit_filter
-            from e2d.core.query_dsl import parse_query
             node = parse_query(fl.get("query"), config, data_object, report)
-            pred = emit_filter(node, config, data_object, report) if node is not None else None
-            if pred is None:
+            if node is None:
                 report.warn(f"Custom filter on `{key}` could not be translated; skipped.",
                             source=str(key))
         else:
             report.warn(f"Unsupported filter type `{ftype}` on `{key}`; skipped.", source=str(key))
             continue
+        pred = emit_filter(node, config, data_object, report) if node is not None else None
         if pred is None:
             continue
         preds.append(f"not ({pred})" if negate else pred)
     return preds
-
-
-def _lit(v: Any) -> str:
-    if isinstance(v, bool):
-        return "true" if v else "false"
-    if isinstance(v, (int, float)):
-        return str(v)
-    s = str(v)
-    return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
