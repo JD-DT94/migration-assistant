@@ -2,13 +2,14 @@ name: Deploy web GUI to GitHub Pages
 
 on:
   push:
-    branches: [main]
+    branches: [main, copilot/fix-404-error]
   workflow_dispatch:
 
 permissions:
   contents: read
   pages: write
   id-token: write
+  administration: write
 
 concurrency:
   group: pages
@@ -17,11 +18,8 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Run test suite
         run: |
