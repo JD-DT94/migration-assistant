@@ -2,7 +2,7 @@ name: Deploy web GUI to GitHub Pages
 
 on:
   push:
-    branches: [main]
+    branches: [main, copilot/fix-404-error]
   workflow_dispatch:
 
 permissions:
