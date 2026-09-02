@@ -36,8 +36,6 @@ jobs:
           tar -xjf /tmp/pyodide-core.tar.bz2 -C _site/pyodide --strip-components=1
 
       - uses: actions/configure-pages@v5
-        with:
-          enablement: true
 
       - uses: actions/upload-pages-artifact@v3
         with:
