@@ -622,11 +622,11 @@ def render_alert(spec: AlertSpec) -> str:
         for f, _v in spec.dropped_fields:
             if f not in seen:
                 seen.append(f)
-        L.append("> ⚠ **OpenPipeline prerequisite.** The filter references field(s) "
-                 f"{', '.join('`' + f + '`' for f in seen)} that aren't Dynatrace built-ins; "
-                 "each was demoted to `matchesPhrase(content, ...)` on the log body. See the "
-                 "`.openpipeline.md` beside this file to extract each field (restoring exact "
-                 "matches) and to publish a metric so this alert can be metric-based long-term.")
+        L.append("> **Note.** The source filter references field(s) "
+                 f"{', '.join('`' + f + '`' for f in seen)} that aren't Dynatrace built-ins; each "
+                 "was translated to `matchesPhrase(content, ...)` on the log body, so this alert "
+                 "**works as-is**. To restore exact-field matching and move the alert onto a "
+                 "metric long-term, see the `.openpipeline.md` beside this file.")
         L.append("")
     L.append("## Firing logic")
     L.append("")
