@@ -29,6 +29,9 @@ jobs:
         run: |
           mkdir -p _site
           cp site/index.html _site/
+          # Stamp the commit SHA onto <html> so the engine-zip fetch can bust
+          # GitHub Pages' long asset cache on every deploy.
+          sed -i "s|<html lang=\"en\">|<html lang=\"en\" data-build=\"${GITHUB_SHA}\">|" _site/index.html
           (cd src && zip -qr ../_site/e2d_src.zip e2d)
           curl -fsSL -o /tmp/pyodide-core.tar.bz2 \
             https://github.com/pyodide/pyodide/releases/download/0.26.4/pyodide-core-0.26.4.tar.bz2
