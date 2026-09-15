@@ -62,3 +62,9 @@ class AlertSpec:
     suppression: Optional[str] = None      # throttle / dedup window
     target: str = TARGET_ANOMALY_DETECTOR  # recommended Dynatrace construct
     detectors: List[Detector] = field(default_factory=list)  # deployable anomaly detectors
+    # (field, sample_value) pairs the KQL translator demoted to
+    # `matchesPhrase(content, ...)` because they aren't built-in Dynatrace
+    # fields and aren't mapped; each needs an OpenPipeline extractor to be
+    # queryable as an exact field, and each is a candidate for a long-term
+    # `value_metric` extraction so this alert can go metric-based.
+    dropped_fields: List[tuple] = field(default_factory=list)
