@@ -83,6 +83,15 @@ class MappingConfig:
     # {"lowercase_fields": false} for data whose keys keep their case.
     lowercase_fields: bool = True
 
+    # Field-name prefixes Dynatrace ships out of the box. Anything else that
+    # isn't explicitly mapped is treated as a "custom" field the Grail data
+    # object won't carry until OpenPipeline extracts it.
+    known_field_prefixes: Tuple[str, ...] = (
+        "dt.", "builtin:", "log.", "loglevel", "content", "timestamp",
+        "host.", "service.", "trace.", "span.", "event.", "k8s.",
+        "kubernetes.", "container.", "cloud.", "process.",
+    )
+
     # ---- resolution helpers -------------------------------------------------
 
     def resolve_data_object(self, index: str) -> Optional[str]:
@@ -95,6 +104,21 @@ class MappingConfig:
             if re.search(pattern, cleaned, re.IGNORECASE):
                 return data_object
         return None
+
+    def is_custom_field(self, name: str, data_object: Optional[str]) -> bool:
+        """True when this Elastic field has no built-in Dynatrace equivalent
+        and no explicit mapping — i.e. it won't exist in Grail until OpenPipeline
+        extracts it. Filtering on it silently returns nothing, so the caller
+        should either drop the predicate to a full-text `matchesPhrase(content,
+        ...)` or flag the field as an OpenPipeline prerequisite."""
+        raw = name[:-len(".keyword")] if name.endswith(".keyword") else name
+        if data_object and data_object in self.data_object_field_map \
+                and raw in self.data_object_field_map[data_object]:
+            return False
+        if raw in self.field_map:
+            return False
+        lower = raw.lower()
+        return not any(lower.startswith(p) for p in self.known_field_prefixes)
 
     def resolve_field(self, name: str, data_object: Optional[str]) -> str:
         """Translate an Elastic field name to its DQL equivalent.
