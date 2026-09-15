@@ -302,6 +302,16 @@ def _do_kibana(text: str, src: str, out: Path, config: MappingConfig, summary: M
                 and title not in summary.unmatched_indexes:
             summary.unmatched_indexes.append(title)
 
+    # A Kibana export can carry alerting rules alongside (or instead of) dashboards.
+    alerts = export.of_type("alert")
+    src_stem = Path(src).stem
+    for a in alerts:
+        rule_doc = {"type": "alert", "attributes": a.attributes,
+                    "references": a.references, "id": a.id}
+        label = _safe_stem(a.attributes.get("name") or a.title or a.id or "alert")
+        alert_src = f"{src_stem}--{label}.alert.json"
+        _do_alert(json.dumps(rule_doc), alert_src, out, config, summary, emit=summary.emit)
+
     dashboards = list(export.dashboards)
     synthesized = False
     if not dashboards:
@@ -310,6 +320,8 @@ def _do_kibana(text: str, src: str, out: Path, config: MappingConfig, summary: M
             dashboards = [synth]
             synthesized = True
     if not dashboards:
+        if alerts:
+            return
         kinds = sorted({o.type for o in export.objects}) or ["no objects"]
         summary.skipped.append(
             f"{src} — Kibana export contains no dashboards, visualizations or saved "
