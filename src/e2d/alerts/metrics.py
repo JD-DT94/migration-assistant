@@ -108,11 +108,12 @@ def _report_dropped_fields(spec: AlertSpec, report) -> None:
         if f in seen:
             continue
         seen.add(f)
-        report.manual(
-            f"Field `{f}` is not a Dynatrace built-in log attribute; the filter fell back to "
-            f"`matchesPhrase(content, ...)` on the log body. **Prereq:** add an OpenPipeline "
-            f"processor to extract `{f}` from the log body so the exact-match filter (and a "
-            "long-term metric on this alert) can be restored.")
+        report.warn(
+            f"Field `{f}` is not a Dynatrace built-in log attribute; the emitted DQL filters the "
+            f"log body with `matchesPhrase(content, ...)` instead — it deploys and fires as-is. "
+            f"To restore an exact-field match and move this alert onto a metric long-term, add "
+            f"an OpenPipeline processor to extract `{f}` (see the `.openpipeline.md` beside "
+            "this alert).")
 
 
 def render_field_extractors(spec: AlertSpec) -> str:
