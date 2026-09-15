@@ -324,6 +324,50 @@ def cmd_assess(args: argparse.Namespace) -> int:
     return 2 if sc["counts"]["manual"] else 0
 
 
+def cmd_azure(args: argparse.Namespace) -> int:
+    """Azure alerting-catalogue (.xlsx tracker) -> Davis anomaly detectors."""
+    import json
+    from e2d.azure import load_tracker, build_catalogue
+    from e2d.azure.build import settings_payload
+    from e2d.azure.render import (render_catalogue, render_consolidation,
+                                  render_deferred)
+    from e2d.migrate import _safe_stem
+
+    monitors = load_tracker(args.input)
+    if not monitors:
+        print(f"error: no catalogue rows found in {args.input}", file=sys.stderr)
+        return 2
+    res = build_catalogue(monitors)
+
+    out = Path(args.output)
+    (out / "detectors").mkdir(parents=True, exist_ok=True)
+    for d in res.detectors:
+        svc = _safe_stem(d.monitor.service)
+        sdir = out / "detectors" / svc
+        sdir.mkdir(parents=True, exist_ok=True)
+        # the clause index keeps a monitor's warning and critical detectors in
+        # separate files rather than one silently overwriting the other
+        suffix = d.key.rsplit("#", 1)[-1]
+        stem = _safe_stem(f"{d.monitor.ident}-{d.monitor.name}")[:80]
+        (sdir / f"{stem}.{suffix}.detectors.json").write_text(
+            json.dumps(settings_payload([d]), indent=2) + "\n", encoding="utf-8")
+
+    (out / "detectors.all.json").write_text(
+        json.dumps(settings_payload(res.detectors), indent=2) + "\n", encoding="utf-8")
+    (out / "CATALOGUE.md").write_text(render_catalogue(res), encoding="utf-8")
+    (out / "CONSOLIDATION.md").write_text(render_consolidation(res), encoding="utf-8")
+    (out / "DEFERRED.md").write_text(render_deferred(res), encoding="utf-8")
+
+    c = res.counts()
+    print(f"{c['monitors']} catalogue rows -> {c['detectors']} detectors "
+          f"({c['detectors'] - c['blocked']} deployable, {c['blocked']} disabled: metric not ingesting)")
+    print(f"{c['deferred']} clauses are not detectors (see DEFERRED.md)")
+    print(f"{c['merge_groups']} merge groups would remove {c['merge_saving']} detectors "
+          f"(see CONSOLIDATION.md)")
+    print(f"Output -> {out}")
+    return 0
+
+
 def cmd_web(args: argparse.Namespace) -> int:
     from e2d.web import serve
     config = _load_config(args.config)
@@ -516,6 +560,14 @@ def build_parser() -> argparse.ArgumentParser:
     bf.add_argument("--insecure", action="store_true", help="Skip TLS verification for Elasticsearch")
     bf.add_argument("--apply", action="store_true", help="Actually ingest (default: dry run)")
     bf.set_defaults(func=cmd_backfill)
+
+    az = sub.add_parser(
+        "azure",
+        help="Convert an Azure alerting-catalogue tracker (.xlsx) into Davis "
+             "anomaly detectors, a build list, and a consolidation report.")
+    az.add_argument("input", help="The tracker workbook (.xlsx)")
+    az.add_argument("-o", "--output", required=True, help="Output directory")
+    az.set_defaults(func=cmd_azure)
 
     w = sub.add_parser("web",
                        help="Launch the local web GUI (offline; data stays on this machine).")
