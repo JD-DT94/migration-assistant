@@ -86,7 +86,31 @@ def is_watcher(doc: dict) -> bool:
 
 
 def is_rule(doc: dict) -> bool:
-    return isinstance(doc, dict) and "rule_type_id" in doc
+    return isinstance(doc, dict) and ("rule_type_id" in doc or "alertTypeId" in doc)
+
+
+def unwrap_kibana_alert(doc: dict) -> dict:
+    """A Kibana saved-object export wraps the rule inside `attributes` and uses
+    the older field name `alertTypeId`; unwrap to the flat rule shape the rest
+    of this module speaks."""
+    if not isinstance(doc, dict):
+        return doc
+    if doc.get("type") == "alert" and isinstance(doc.get("attributes"), dict):
+        inner = dict(doc["attributes"])
+    else:
+        inner = dict(doc)
+    if "alertTypeId" in inner and "rule_type_id" not in inner:
+        inner["rule_type_id"] = inner.pop("alertTypeId")
+    actions = inner.get("actions")
+    if isinstance(actions, list):
+        remapped = []
+        for a in actions:
+            if isinstance(a, dict) and "actionTypeId" in a and "id" not in a:
+                a = dict(a)
+                a["id"] = a["actionTypeId"]
+            remapped.append(a)
+        inner["actions"] = remapped
+    return inner
 
 
 # --------------------------------------------------------------------------- #
@@ -387,9 +411,13 @@ def _actions_from_rule(actions: List[Dict[str, Any]], report: Report) -> List[Ac
     for a in actions or []:
         aid = a.get("id", "")
         params = a.get("params", {})
-        kind = "slack" if "slack" in aid.lower() or "message" in params else \
-               "email" if "email" in aid.lower() or "to" in params else \
-               "webhook" if "webhook" in aid.lower() or "body" in params else "unknown"
+        aid_l = aid.lower()
+        kind = "email" if "email" in aid_l else \
+               "slack" if "slack" in aid_l else \
+               "webhook" if "webhook" in aid_l else \
+               "slack" if "message" in params else \
+               "email" if "to" in params else \
+               "webhook" if "body" in params else "unknown"
         target = ", ".join(params["to"]) if isinstance(params.get("to"), list) else aid
         secret = f"{aid} (credential in the Kibana connector)" if kind == "webhook" else None
         out.append(Action(kind, target, secret))
@@ -452,6 +480,7 @@ def _rule_es_query(params: Dict[str, Any], group_by: List[str], config: MappingC
     else:
         filt_clause = ""
         eq = params.get("esQuery")
+        sc = params.get("searchConfiguration")
         if eq:
             try:
                 q = json.loads(eq) if isinstance(eq, str) else eq
@@ -460,6 +489,17 @@ def _rule_es_query(params: Dict[str, Any], group_by: List[str], config: MappingC
                 filt_clause = ("\n| filter " + m.group(1)) if m else ""
             except Exception as e:
                 report.warn(f"Could not parse `.es-query` esQuery ({e}); emitted a bare count.")
+        elif isinstance(sc, dict):
+            q = (sc.get("query") or {})
+            lang = q.get("language")
+            text = q.get("query", "")
+            if lang == "kuery" and text:
+                kql = translate_kql(text, config, "logs", report)
+                if kql:
+                    filt_clause = "\n| filter " + kql
+            elif text:
+                report.warn(f"`.es-query` searchConfiguration language `{lang}` not translated; "
+                            "set the filter manually.")
         display = f"fetch logs{filt_clause}\n| summarize count()"
         detector_q = f"fetch logs{filt_clause}\n| makeTimeseries count = count(), interval: 1m{by}"
     cmp_ = _cmp(params.get("thresholdComparator", ">"))
@@ -522,6 +562,7 @@ def translate_alert(text_or_doc: Any, config: Optional[MappingConfig] = None,
     config = config or MappingConfig()
     report = Report()
     doc = text_or_doc if isinstance(text_or_doc, dict) else json.loads(text_or_doc)
+    doc = unwrap_kibana_alert(doc)
 
     if is_rule(doc):
         spec = _from_rule(doc, config, report, name)
