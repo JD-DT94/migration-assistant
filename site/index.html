@@ -808,7 +808,11 @@ async function loadRuntime() {
 async function boot() {
   try {
     py = await loadRuntime();
-    const resp = await fetch("e2d_src.zip");
+    // Cache-bust the engine zip against GitHub Pages' long asset cache.
+    // The build id lives in <html data-build> and is replaced at deploy time;
+    // dev-served pages (no data-build attr) fall back to a per-load timestamp.
+    const buildId = document.documentElement.getAttribute("data-build") || String(Date.now());
+    const resp = await fetch("e2d_src.zip?v=" + encodeURIComponent(buildId), { cache: "no-cache" });
     if (!resp.ok) throw new Error("engine bundle missing (e2d_src.zip)");
     py.unpackArchive(await resp.arrayBuffer(), "zip", { extractDir: "/lib/e2d-src" });
     py.FS.mkdirTree("/work/in");
