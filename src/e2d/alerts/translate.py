@@ -15,7 +15,7 @@ from e2d.alerts.model import (Action, AlertSpec, Detector, Threshold,
                               TARGET_ANOMALY_DETECTOR, TARGET_WORKFLOW)
 from e2d.config import MappingConfig
 from e2d.core.query_dsl import convert_query_dsl
-from e2d.dashboards.kql import translate_kql
+from e2d.dashboards.kql import translate_kql, translate_kql_ex
 from e2d.dql.validate import lint_into_report
 from e2d.report import Report
 
@@ -320,7 +320,8 @@ def _watcher_detectors(spec: AlertSpec, body: Dict[str, Any], report: Report) ->
 # --------------------------------------------------------------------------- #
 
 def _rule_filters(params: Dict[str, Any], config: MappingConfig, data_object: str,
-                  report: Report) -> List[str]:
+                  report: Report,
+                  dropped: Optional[List[Tuple[str, str]]] = None) -> List[str]:
     preds: List[str] = []
     for c in params.get("criteria", []):
         field = c.get("field") or c.get("metric")
@@ -330,9 +331,12 @@ def _rule_filters(params: Dict[str, Any], config: MappingConfig, data_object: st
             preds.append(f"{config.resolve_field(field, data_object)} {_cmp(c['comparator'])} {rendered}")
     fq = params.get("filterQuery")
     if fq:
-        kql = translate_kql(fq, config, data_object, report)
+        kql, df = translate_kql_ex(fq, config, data_object, report,
+                                   strict_field_check=True)
         if kql:
             preds.append(kql)
+        if dropped is not None:
+            dropped.extend(df)
     return preds
 
 
@@ -352,8 +356,10 @@ def _count_detector(subject: str, base_dql_filter: List[str], group_by: List[str
 
 
 def _rule_count_dql(params: Dict[str, Any], group_by: List[str], config: MappingConfig,
-                    report: Report) -> Tuple[str, List[Threshold], List[Detector]]:
-    preds = _rule_filters(params, config, "logs", report)
+                    report: Report,
+                    dropped: Optional[List[Tuple[str, str]]] = None
+                    ) -> Tuple[str, List[Threshold], List[Detector]]:
+    preds = _rule_filters(params, config, "logs", report, dropped)
     lines = ["fetch logs"]
     if preds:
         lines.append("filter " + " and ".join(preds))
@@ -373,11 +379,19 @@ def _rule_count_dql(params: Dict[str, Any], group_by: List[str], config: Mapping
 
 
 def _rule_metric_dql(params: Dict[str, Any], group_by: List[str], config: MappingConfig,
-                     report: Report) -> Tuple[str, List[Threshold], List[Detector]]:
+                     report: Report,
+                     dropped: Optional[List[Tuple[str, str]]] = None
+                     ) -> Tuple[str, List[Threshold], List[Detector]]:
     report.warn("Metric-threshold rule: Elastic metric names are passed through — verify each exists "
                 "in Dynatrace (a non-`dt.*` key likely needs creating via OpenPipeline).")
     fq = params.get("filterQuery")
-    filt = translate_kql(fq, config, None, report) if fq else ""
+    if fq:
+        filt, df = translate_kql_ex(fq, config, None, report,
+                                    strict_field_check=True)
+        if dropped is not None:
+            dropped.extend(df)
+    else:
+        filt = ""
     by = f", by: {{{', '.join(group_by)}}}" if group_by else ""
     filt_clause = f", filter: {{{filt}}}" if filt else ""
 
@@ -465,9 +479,12 @@ def _rule_index_threshold(params: Dict[str, Any], group_by: List[str], config: M
 
 
 def _rule_es_query(params: Dict[str, Any], group_by: List[str], config: MappingConfig,
-                   report: Report) -> Tuple[str, List[Threshold], List[Detector]]:
+                   report: Report,
+                   dropped: Optional[List[Tuple[str, str]]] = None
+                   ) -> Tuple[str, List[Threshold], List[Detector]]:
     """`.es-query`: a Query DSL or ES|QL search, count-thresholded over a window."""
     import json
+    _spec_dropped: List[Tuple[str, str]] = dropped if dropped is not None else []
     esql = (params.get("esqlQuery") or {}).get("esql")
     by = f", by: {{{', '.join(group_by)}}}" if group_by else ""
     if esql:
@@ -494,9 +511,12 @@ def _rule_es_query(params: Dict[str, Any], group_by: List[str], config: MappingC
             lang = q.get("language")
             text = q.get("query", "")
             if lang == "kuery" and text:
-                kql = translate_kql(text, config, "logs", report)
+                kql, df = translate_kql_ex(text, config, "logs", report,
+                                           strict_field_check=True)
                 if kql:
                     filt_clause = "\n| filter " + kql
+                if df:
+                    _spec_dropped.extend(df)
             elif text:
                 report.warn(f"`.es-query` searchConfiguration language `{lang}` not translated; "
                             "set the filter manually.")
@@ -521,10 +541,12 @@ def _from_rule(doc: dict, config: MappingConfig, report: Report,
     spec.window = _rule_window(params)
     rtype = doc.get("rule_type_id", "")
 
+    dropped: List[Tuple[str, str]] = []
     if "metric" in rtype:
         spec.data_object = "metrics"
         spec.group_by = _rule_group_by(params, config, None)
-        spec.dql, spec.thresholds, spec.detectors = _rule_metric_dql(params, spec.group_by, config, report)
+        spec.dql, spec.thresholds, spec.detectors = _rule_metric_dql(
+            params, spec.group_by, config, report, dropped)
     elif rtype == ".index-threshold":
         spec.data_object = "logs"
         spec.group_by = _rule_group_by(params, config, "logs")
@@ -532,11 +554,14 @@ def _from_rule(doc: dict, config: MappingConfig, report: Report,
     elif rtype == ".es-query":
         spec.data_object = "logs"
         spec.group_by = _rule_group_by(params, config, "logs")
-        spec.dql, spec.thresholds, spec.detectors = _rule_es_query(params, spec.group_by, config, report)
+        spec.dql, spec.thresholds, spec.detectors = _rule_es_query(
+            params, spec.group_by, config, report, dropped)
     else:  # logs.alert.document.count and similar
         spec.data_object = "logs"
         spec.group_by = _rule_group_by(params, config, "logs")
-        spec.dql, spec.thresholds, spec.detectors = _rule_count_dql(params, spec.group_by, config, report)
+        spec.dql, spec.thresholds, spec.detectors = _rule_count_dql(
+            params, spec.group_by, config, report, dropped)
+    spec.dropped_fields = dropped
     spec.actions = _actions_from_rule(doc.get("actions", []), report)
     spec.target = TARGET_ANOMALY_DETECTOR
     return spec
@@ -591,6 +616,17 @@ def render_alert(spec: AlertSpec) -> str:
         L.append("```dql")
         L.append(spec.dql)
         L.append("```")
+        L.append("")
+    if spec.dropped_fields:
+        seen = []
+        for f, _v in spec.dropped_fields:
+            if f not in seen:
+                seen.append(f)
+        L.append("> ⚠ **OpenPipeline prerequisite.** The filter references field(s) "
+                 f"{', '.join('`' + f + '`' for f in seen)} that aren't Dynatrace built-ins; "
+                 "each was demoted to `matchesPhrase(content, ...)` on the log body. See the "
+                 "`.openpipeline.md` beside this file to extract each field (restoring exact "
+                 "matches) and to publish a metric so this alert can be metric-based long-term.")
         L.append("")
     L.append("## Firing logic")
     L.append("")

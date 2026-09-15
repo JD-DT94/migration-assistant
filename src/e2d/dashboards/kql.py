@@ -12,7 +12,7 @@ parentheses, and bare full-text terms -> matchesPhrase(content, ...).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Tuple
 
 from e2d.config import MappingConfig
 from e2d.report import Report
@@ -85,12 +85,20 @@ def _tokenize(s: str) -> List[K]:
 
 class KqlParser:
     def __init__(self, tokens: List[K], config: MappingConfig,
-                 data_object: Optional[str], report: Report):
+                 data_object: Optional[str], report: Report,
+                 strict_field_check: bool = False):
         self.toks = tokens
         self.pos = 0
         self.config = config
         self.data_object = data_object
         self.report = report
+        # (field, sample_value) pairs dropped to `matchesPhrase(content, ...)`
+        # because the field isn't a built-in Dynatrace field and isn't mapped.
+        # Only populated when strict_field_check is True (alerts opt in; dashboards
+        # keep the original behaviour so a filter that returns nothing is a visible
+        # debugging problem, not a silent alert failure).
+        self.strict_field_check = strict_field_check
+        self.dropped_fields: List[Tuple[str, str]] = []
 
     def _peek(self) -> Optional[K]:
         return self.toks[self.pos] if self.pos < len(self.toks) else None
@@ -196,16 +204,65 @@ class KqlParser:
     def _field_match(self) -> str:
         field_tok = self._next()  # word
         self._next()  # colon
-        field = self._resolve(field_tok.value)
+        raw_field = field_tok.value
+        field = self._resolve(raw_field)
+        report_field = raw_field[:-len(".keyword")] if raw_field.endswith(".keyword") else raw_field
+        is_custom = self.strict_field_check and \
+            self.config.is_custom_field(raw_field, self.data_object)
         nxt = self._peek()
         if nxt and nxt.type == T_LP:
+            if is_custom:
+                return self._value_list_as_phrase(report_field)
             return self._value_list(field)
         val = self._next()
         if val is None:
             return ""
         if val.type == T_WORD and val.value == "*":
+            # `custom.field : *` — presence check on a field that won't be there
+            # yet just becomes a no-op; flag it and drop.
+            if is_custom:
+                self.dropped_fields.append((report_field, ""))
+                self.report.warn(
+                    f"Field `{report_field}` is not a Dynatrace built-in and is not mapped; "
+                    "its presence check was dropped. Configure it in OpenPipeline to keep the check.")
+                return "true"
             return f"isNotNull({_q(field)})"
+        if is_custom and "*" not in val.value and "?" not in val.value:
+            self.dropped_fields.append((report_field, val.value))
+            self.report.warn(
+                f"Field `{report_field}` is not a Dynatrace built-in and is not mapped; "
+                f"rewrote `{report_field} : \"{val.value}\"` as "
+                f"`matchesPhrase(content, \"{val.value}\")`. Configure the field in OpenPipeline "
+                "to get an exact match back.")
+            return f'matchesPhrase(content, "{_esc(val.value)}")'
         return _match(field, val.value, val.type == T_STRING, self.report)
+
+    def _value_list_as_phrase(self, raw_field: str) -> str:
+        """Custom-field value-list `field : (a or b)` -> matchesPhrase against
+        the log body, ORed together; records the drop."""
+        self._next()  # '('
+        values: List[str] = []
+        op = "or"
+        while True:
+            t = self._peek()
+            if t is None or t.type == T_RP:
+                break
+            if t.type == T_WORD and t.value.lower() in ("or", "and"):
+                op = t.value.lower()
+                self._next()
+                continue
+            tok = self._next()
+            values.append(tok.value)
+        if self._peek() and self._peek().type == T_RP:
+            self._next()
+        for v in values:
+            self.dropped_fields.append((raw_field, v))
+        joined = f" {op} ".join(f'matchesPhrase(content, "{_esc(v)}")' for v in values)
+        self.report.warn(
+            f"Field `{raw_field}` is not a Dynatrace built-in and is not mapped; "
+            f"rewrote `{raw_field} : (…)` as `matchesPhrase(content, …)` clauses. "
+            "Configure the field in OpenPipeline to get exact matches back.")
+        return f"({joined})" if len(values) > 1 else joined
 
     def _value_list(self, field: str) -> str:
         self._next()  # '('
@@ -293,16 +350,29 @@ def _match(field: str, value: str, was_quoted: bool, report: Report) -> str:
 def translate_kql(query: str, config: MappingConfig, data_object: Optional[str],
                   report: Report) -> str:
     """Translate a KQL string into a DQL boolean expression. Empty -> ''."""
+    out, _dropped = translate_kql_ex(query, config, data_object, report)
+    return out
+
+
+def translate_kql_ex(query: str, config: MappingConfig, data_object: Optional[str],
+                     report: Report, strict_field_check: bool = False
+                     ) -> Tuple[str, List[Tuple[str, str]]]:
+    """Like `translate_kql`, plus the (field, value) pairs the translator
+    demoted to `matchesPhrase(content, ...)` because the field isn't a built-in
+    Dynatrace field and isn't mapped. `strict_field_check` gates that demotion
+    — off for dashboards (a broken filter surfaces on the panel), on for alerts
+    (a silent zero-count would suppress the alert entirely)."""
     if not query or not query.strip():
-        return ""
+        return "", []
     tokens = _tokenize(query)
-    parser = KqlParser(tokens, config, data_object, report)
+    parser = KqlParser(tokens, config, data_object, report,
+                       strict_field_check=strict_field_check)
     out = parser.parse()
     if parser.pos < len(tokens):
         rest = " ".join(t.value for t in tokens[parser.pos:])
         report.warn(f"KQL query only partially translated; unparsed trailing input `{rest[:60]}` "
                     "was dropped — review.", source=query[:80])
-    return out
+    return out, list(parser.dropped_fields)
 
 
 def translate_query_string(query: Any, language: Optional[str], config: MappingConfig,

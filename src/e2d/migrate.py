@@ -434,7 +434,7 @@ def _do_alert(text: str, src: str, out: Path, config: MappingConfig, summary: Mi
               emit: str = "both") -> None:
     from e2d.alerts import translate_alert, render_alert
     from e2d.alerts.tf import render_detectors_tf, has_terraform, needs_workflow
-    from e2d.alerts.metrics import render_metric_creation
+    from e2d.alerts.metrics import render_metric_creation, render_field_extractors
     base = Path(src).stem
     res = translate_alert(text, config, name=base)
     adir = out / "alerts"
@@ -445,6 +445,10 @@ def _do_alert(text: str, src: str, out: Path, config: MappingConfig, summary: Mi
     if res.spec.dql:
         (adir / f"{base}.dql").write_text(res.spec.dql + "\n", encoding="utf-8")
         outs.insert(0, f"alerts/{base}.dql")
+    field_md = render_field_extractors(res.spec)
+    if field_md:
+        (adir / f"{base}.openpipeline.md").write_text(field_md, encoding="utf-8")
+        outs.append(f"alerts/{base}.openpipeline.md")
     if has_terraform(res.spec) and emit in ("json", "both"):
         from e2d.sinks.dynatrace import detector_settings_value, ANOMALY_SCHEMA
         body = [{"schemaId": ANOMALY_SCHEMA, "scope": "environment",
