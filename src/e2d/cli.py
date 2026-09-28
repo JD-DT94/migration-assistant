@@ -382,7 +382,7 @@ def cmd_web(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="e2d",
-        description="Convert Elastic and AppDynamics artifacts to Dynatrace.")
+        description="Convert Elastic, AppDynamics and Azure Monitor artifacts to Dynatrace.")
     sub = p.add_subparsers(dest="command", required=True)
 
     c = sub.add_parser("convert", help="Translate one ES|QL file (or - for stdin) to DQL.")

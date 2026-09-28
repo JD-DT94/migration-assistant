@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "migration-assistant"
 version = "0.2.0"
-description = "Convert Elastic and AppDynamics configuration into Dynatrace equivalents: dashboards, DQL, alerts, pipelines, and a OneAgent onboarding plan."
+description = "Convert Elastic, AppDynamics and Azure Monitor configuration into Dynatrace equivalents: dashboards, DQL, alerts, pipelines, and a OneAgent onboarding plan."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
