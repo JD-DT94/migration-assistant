@@ -1,8 +1,8 @@
 # migration assist (`e2d`)
 
-Convert **Elastic / Kibana** and **AppDynamics** artifacts into Dynatrace
-equivalents: dashboards, alerts, ingest pipelines, transforms, queries — and,
-for AppDynamics, a OneAgent onboarding plan sized by host.
+Convert **Elastic / Kibana**, **AppDynamics** and **Azure Monitor** artifacts
+into Dynatrace equivalents: dashboards, alerts, ingest pipelines, transforms,
+queries — and, for AppDynamics, a OneAgent onboarding plan sized by host.
 
 ## Use it in the browser (nothing to install)
 
@@ -64,6 +64,19 @@ converter goes silently wrong:
   detectors and tiles carry their original AppD scope as a note for a human to
   apply, rather than a guessed filter that would match nothing.
 
+### Azure Monitor
+
+| Input | Output |
+|-------|--------|
+| Alerting-catalogue tracker (`.xlsx`: one sheet per Azure service, one row per required monitor with metric, condition in prose, severity) | Davis anomaly detectors as Settings 2.0 JSON — one file per monitor/severity under `detectors/<service>/`, plus `detectors.all.json` |
+| *(always)* | `CATALOGUE.md` — every row and the detector(s) it became |
+| *(always)* | `CONSOLIDATION.md` — near-duplicate monitors that could be merged, and how many detectors that saves |
+| *(always)* | `DEFERRED.md` — conditions that cannot be a Davis detector, grouped by what to build instead |
+
+Monitors whose metric is not yet ingesting are still emitted, but disabled, so
+they can be switched on once the data arrives. Run it with
+`e2d azure <tracker.xlsx> -o out/`.
+
 Every run also produces a plain-English `MIGRATION_REPORT.md` with a
 deployment-order plan, per-dashboard field manifests (`*.fields.md`
 — what must exist at ingest or a tile renders empty), a `METRICS-GUIDE.md`
@@ -79,6 +92,7 @@ e2d assess <export-dir>                     # scorecard only, converts nothing
                                             # exit 0 clean / 2 manual work / 1 errors
 e2d migrate <export-dir> -o out/            # convert everything, one report
 e2d dashboard export.ndjson -o out/         # dashboards only
+e2d azure tracker.xlsx -o out/              # Azure alerting catalogue -> detectors
 e2d verify out/ --env-url https://<env>.apps.dynatrace.com          # DQL check
 e2d verify out/ --data ...                  # + flag tiles that return no data
 e2d push out/dashboards --env-url ... --apply                       # deploy
